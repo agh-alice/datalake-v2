@@ -1,1 +1,6 @@
 # environment: kind — overrides land here as components arrive
+
+landingDb:
+  instances: 1
+  storageSize: 2Gi
+

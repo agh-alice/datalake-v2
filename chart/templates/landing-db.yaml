@@ -1,0 +1,22 @@
+# Landing DB replacing the RAID0 VM (design D7). max_connections deliberately
+# low: the historical multi-client scaling attempts DDoSed Postgres (E6).
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: mon-data
+  namespace: landing-db
+spec:
+  instances: {{ .Values.landingDb.instances }}
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  storage:
+    size: {{ .Values.landingDb.storageSize }}
+  postgresql:
+    parameters:
+      max_connections: {{ .Values.landingDb.maxConnections | quote }}
+      autovacuum_freeze_max_age: "200000000"
+  bootstrap:
+    initdb:
+      database: mon_data
+      owner: mon_user
+  monitoring:
+    enablePodMonitor: {{ .Values.landingDb.enablePodMonitor }}

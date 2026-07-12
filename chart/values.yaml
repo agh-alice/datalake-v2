@@ -11,6 +11,12 @@ lakekeeperDb:
   storageSize: 5Gi
   enablePodMonitor: false   # true in Task 6
 
+landingDb:
+  instances: 3
+  storageSize: 50Gi
+  maxConnections: "60"
+  enablePodMonitor: false   # true in Task 6
+
 # Lakekeeper's Postgres secret-store encryption key lives in Secret
 # lakekeeper/lakekeeper-pg-encryption -- created by hack/kind-up.sh on kind
 # (random per cluster) and by ExternalSecret on cyfronet. Never templated in

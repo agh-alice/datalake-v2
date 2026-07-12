@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper)   # extended by later tasks
+EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper external-secrets)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -11,11 +11,21 @@ for app in "${EXPECTED_APPS[@]}"; do
   done
 done
 # Hard gate (probe pattern per Task 2/3 reviews: soft `A && echo` falls through under set -e)
+# Primary resolved via currentPrimary (Task 3 review Minor: never pin -1; failover breaks it)
+LK_PRIMARY=$(kubectl -n lakekeeper get cluster lakekeeper-db -o jsonpath='{.status.currentPrimary}')
 if kubectl -n lakekeeper wait cluster/lakekeeper-db --for=condition=Ready --timeout=300s \
-   && kubectl -n lakekeeper exec lakekeeper-db-1 -- psql -U postgres -Atc "SELECT 1" | grep -qx 1; then
+   && kubectl -n lakekeeper exec "$LK_PRIMARY" -- psql -U postgres -Atc "SELECT 1" | grep -qx 1; then
   echo "lakekeeper-db OK"
 else
   echo "FAIL: lakekeeper-db not Ready or not answering"; exit 1
+fi
+# Hard gate + primary-resolved pod (Task 3 review: never pin -1; failover breaks it)
+MD_PRIMARY=$(kubectl -n landing-db get cluster mon-data -o jsonpath='{.status.currentPrimary}')
+if kubectl -n landing-db wait cluster/mon-data --for=condition=Ready --timeout=300s \
+   && kubectl -n landing-db exec "$MD_PRIMARY" -- psql -U postgres -d mon_data -Atc "SHOW max_connections" | grep -qx 60; then
+  echo "landing-db OK"
+else
+  echo "FAIL: mon-data not Ready or max_connections wrong"; exit 1
 fi
 git fetch origin 'refs/heads/environments/*:refs/remotes/origin/environments/*' 2>/dev/null || true
 # Hard gate (Task 2 review finding): a bare `A && B` under set -e falls through
