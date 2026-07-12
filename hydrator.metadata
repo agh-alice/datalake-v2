@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "5155ccff0c15c874b69ac0aaa24020f0cf2f1c5b",
+  "drySha": "5560b40386b8e93e91d3b543cfec8c52d640177f",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T14:37:11Z",
-  "subject": "feat: nightly and site-sonar cronworkflows with verified retention",
-  "body": "Plan 2 Task 4. Adds ingest-nightly (2-step DAG: run-nightly -> run-retention,\nhard success dependency) and ingest-sitesonar CronWorkflows, plus\nretention.py (TDD: presence-verified 14-day landing deletion -- a job_id\nis only deleted from a landing table once verified present in the\ncorresponding Iceberg table via pyiceberg's In() row-filter, batched\n10k; unverified rows are kept, counted, and logged, and drive a non-zero\nexit for Task 5's alerting) and sitesonar.py (dlt resource scraping\nalimonitor.cern.ch Site Sonar .out.xz dumps into table site_sonar).\n\nFixture fix: hack/seed-fixture.sh's trace.laststatuschangetimestamp was\nemitting epoch SECONDS (verified empirically against the live kind\nfixture), not the epoch MILLISECONDS production actually uses (gen-1 Java\nconvention) -- fixed at the source so retention.py's trace-table cutoff\npredicate matches real production semantics without a magnitude-sniffing\nheuristic.\n\nImage not yet rebuilt/pinned in this commit -- CI (ingest-image.yaml)\npicks up this push; the digest bump lands in a follow-up commit once the\nnew digest is known (established two-commit pattern, see 5b933b2).\n"
+  "date": "2026-07-12T14:40:11Z",
+  "subject": "chore: pin ingest image digest for Task 4 (retention + sitesonar)",
+  "body": "Rebuilt after 5155ccf (retention.py, sitesonar.py, ingest-cronworkflows.yaml).\nCI run 29196603972; digest verified resolvable via the GHCR registry API.\n"
 }
