@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: datalake-cyfronet
+  namespace: argocd
+spec:
+  project: datalake
+  sourceHydrator:
+    drySource:
+      repoURL: https://github.com/agh-alice/datalake-v2.git
+      targetRevision: main
+      path: chart
+      helm:
+        valueFiles: [values.yaml, values-cyfronet.yaml]
+    # PR gate (docs/runbooks/bootstrap-cyfronet.md): the commit-server pushes
+    # rendered manifests to hydrateTo.targetBranch, NOT to syncSource.targetBranch
+    # directly. syncSource (below) is what this Application actually syncs from,
+    # so a hydration never reaches the live cluster until someone opens and merges
+    # a PR from environments/cyfronet-next into environments/cyfronet. This is the
+    # same drySource/syncSource shape as environments/kind/apps/datalake.yaml, with
+    # hydrateTo added to interpose that review step for the production environment.
+    hydrateTo:
+      targetBranch: environments/cyfronet-next
+    syncSource:
+      targetBranch: environments/cyfronet
+      path: chart
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true, ServerSideApply=true]

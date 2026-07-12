@@ -1,0 +1,47 @@
+# cyfronet (production) ArgoCD bootstrap values. Same hydrator/commit-server/
+# metrics posture as environments/kind/argocd-values.yaml, minus the kind-only
+# server.insecure escape hatch (a real cluster gets TLS the way it decides to
+# terminate it -- not covered by this file), plus baseline resource requests
+# suited to a shared multi-tenant cluster.
+configs:
+  params:
+    hydrator.enabled: "true"
+commitServer:
+  enabled: true
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 256Mi}
+dex:
+  enabled: false
+# Same rationale as environments/kind/argocd-values.yaml: the ArgoAppOutOfSync
+# alert (design D11 / E2) needs the application controller's metrics endpoint
+# scraped. The chart's own serviceMonitor.enabled stays off here too --
+# datalake-cyfronet's chart/templates/argocd-servicemonitor.yaml is the
+# ServiceMonitor of record, and (per the Task 8 review correction of the kind
+# file's comment) there is no ordering guarantee between this bootstrap
+# install and kube-prometheus-stack's CRDs -- selfHeal on the datalake-cyfronet
+# Application is what makes it converge once the CRD exists, same as on kind.
+controller:
+  metrics:
+    enabled: true
+  resources:
+    requests: {cpu: 250m, memory: 256Mi}
+    limits: {memory: 1Gi}
+repoServer:
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 512Mi}
+server:
+  resources:
+    requests: {cpu: 100m, memory: 128Mi}
+    limits: {memory: 256Mi}
+# --- Same execution-time deviation as environments/kind/argocd-values.yaml
+# (Task 2, 2026-07-12): chart 10.1.3 bundles appVersion v3.4.5 (Source
+# Hydrator alpha); v3.5.0 has not GA'd, only rc1/rc2 exist upstream. Owner
+# decision 2026-07-12: newest hydrator wins, RCs are acceptable in every
+# environment including production, and re-pinning to v3.5.0 GA once it ships
+# is a routine version bump -- NOT a gate on this bootstrap. Re-evaluate the
+# pin when a chart bundles v3.5.0 GA (see docs/runbooks/bootstrap-cyfronet.md).
+global:
+  image:
+    tag: v3.5.0-rc2
