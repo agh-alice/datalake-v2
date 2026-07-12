@@ -68,4 +68,11 @@ ingest:
   schedules:
     nightly: "0 2 * * *"
     sitesonar: "0 3 * * *"
+    # Plan 2 Task 5: weekly Iceberg snapshot expiry (ingest/src/alice_ingest/
+    # maintenance.py). Sunday 04:00 -- outside nightly's 02:00 and
+    # sitesonar's 03:00 windows so it never contends with either for the
+    # landing-DB/Lakekeeper connection, and weekly (not nightly) because
+    # snapshot accumulation across one day of nightly + sitesonar merges is
+    # not large enough to need daily expiry (design D12).
+    maintenance: "0 4 * * 0"
   retentionDays: "14"

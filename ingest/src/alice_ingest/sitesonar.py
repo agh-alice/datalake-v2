@@ -29,15 +29,28 @@ coerced).
 Incremental behavior: dlt's incremental cursor on the row-level
 `last_updated` field (same shape as pipeline.py's per-table cursors) makes
 reruns over the SAME file idempotent (append-only, but a repeat run yields
-no new rows once the watermark has advanced past them). It does NOT skip
-downloading a file whose rows are already covered by state -- avoiding
-that download for the full historical backlog (1740 files, tens of GB
-decompressed) every night is out of scope for Task 4: the `--limit` CLI
-flag (caps fetching to the N most-recent files by filename-embedded epoch)
-is what Task 4's e2e probe uses, and doubles as an operational safety
-valve. A file-level skip-list keyed on already-seen filenames would close
-this gap; left as a documented follow-up (no CronWorkflow-observed
-production run yet to size the real nightly backlog against).
+no new rows once the watermark has advanced past them).
+
+File-level high-water mark (Plan 2 Task 5 -- scoped in from the P2T4
+review): downloading and decompressing the full historical backlog (1740
+files, tens of GB decompressed) every night was Task 4's documented gap.
+Closed here via `dlt.current.resource_state()` -- the idiomatic dlt pattern
+for exactly this ("skip already-processed archives across runs"; see dlt's
+own `resource_state()` docstring example, which is this same shape: track
+processed identifiers in resource-scoped state, persisted to the
+destination alongside the pipeline's data on a successful run, and
+restored on the next run). `select_files_to_fetch()` filters the parsed
+listing down to files whose filename-embedded epoch is strictly greater
+than `state["high_water_mark"]`; `_iter_rows()` fetches only that filtered
+set and advances the high-water mark to the max epoch actually fetched --
+only after the fetch loop completes without raising, so a run that fails
+partway through never advances the mark past a file it didn't finish
+(dlt's own state-commit semantics reinforce this at the pipeline level: a
+failed `pipeline.run()` does not persist updated state to the destination
+at all, so a hard failure retries the same files next run too). The
+`--limit` CLI flag still applies -- now to the NEWLY-selected files, not
+the full listing -- and still doubles as an operational safety valve /
+Task 4's e2e probe mechanism.
 """
 
 from __future__ import annotations
@@ -46,7 +59,7 @@ import json
 import lzma
 import os
 import re
-from typing import Iterable, Iterator, Mapping
+from typing import Iterable, Iterator, Mapping, MutableMapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import dlt
@@ -103,23 +116,64 @@ def fetch_and_parse(url: str, session: requests.Session) -> Iterator[dict]:
             continue
 
 
+def select_files_to_fetch(
+    files: Sequence[tuple[int, str]], high_water_mark: int
+) -> list[tuple[int, str]]:
+    """Filter `files` (epoch, url pairs, as returned by list_source_files --
+    already sorted most-recent-first) down to those NOT YET processed: a
+    filename-embedded epoch strictly greater than `high_water_mark`.
+    Strictly-greater-than (not >=): a file AT the high-water mark was the
+    last one a prior run already fetched, so it is excluded, not
+    reselected. Order is preserved (module docstring: high-water mark
+    tracking; `_iter_rows` relies on the max of what THIS call selects)."""
+    return [(epoch, url) for epoch, url in files if epoch > high_water_mark]
+
+
 def _iter_rows(
-    base_url: str, limit: int | None, session: requests.Session
+    base_url: str,
+    limit: int | None,
+    session: requests.Session,
+    state: MutableMapping[str, int],
 ) -> Iterable[dict]:
+    """Fetch+parse only files newer than `state["high_water_mark"]` (module
+    docstring's high-water-mark skip), then advance the mark to the max
+    epoch actually fetched -- but only once the whole selected batch has
+    been consumed without raising, so a mid-run failure never advances the
+    mark past a file whose rows didn't make it into this run's yield."""
     listing = session.get(base_url, timeout=30)
     listing.raise_for_status()
     files = list_source_files(listing.text, base_url)
+
+    high_water_mark = state.get("high_water_mark", 0)
+    new_files = select_files_to_fetch(files, high_water_mark)
+    already_processed_skipped = len(files) - len(new_files)
     if limit is not None:
-        files = files[:limit]
-    for _epoch, url in files:
+        new_files = new_files[:limit]
+
+    print(
+        f"SITESONAR high_water_mark={high_water_mark} files_listed={len(files)} "
+        f"files_already_processed_skipped={already_processed_skipped} "
+        f"files_to_fetch={len(new_files)}"
+    )
+
+    max_epoch_fetched = high_water_mark
+    for epoch, url in new_files:
         yield from fetch_and_parse(url, session)
+        if epoch > max_epoch_fetched:
+            max_epoch_fetched = epoch
+
+    if max_epoch_fetched > high_water_mark:
+        state["high_water_mark"] = max_epoch_fetched
 
 
 def build_site_sonar_resource(env: Mapping[str, str], limit: int | None = None):
     """dlt resource: yields site-sonar rows across the `limit` most-recent
-    `.out.xz` files (or the full listing if `limit` is None) -> table
+    NEW `.out.xz` files (or every new file if `limit` is None) -> table
     `site_sonar`, append, schema_contract evolve/freeze, table_format
-    iceberg (brief, Step 3)."""
+    iceberg (brief, Step 3). "New" is decided by the high-water-mark skip
+    (module docstring) against `dlt.current.resource_state()` -- dlt's own
+    resource-scoped, destination-persisted state store, the same mechanism
+    `last_updated`'s row-level incremental cursor rides on."""
     base_url = env.get("SITESONAR_URL", DEFAULT_SITESONAR_URL)
 
     @dlt.resource(
@@ -133,7 +187,8 @@ def build_site_sonar_resource(env: Mapping[str, str], limit: int | None = None):
         last_updated=dlt.sources.incremental("last_updated", initial_value=0),
     ):
         session = requests.Session()
-        yield from _iter_rows(base_url, limit, session)
+        state = dlt.current.resource_state()
+        yield from _iter_rows(base_url, limit, session, state)
 
     return site_sonar
 

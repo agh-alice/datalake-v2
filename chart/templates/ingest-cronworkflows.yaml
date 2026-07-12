@@ -68,3 +68,31 @@ spec:
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-sitesonar"]
+---
+# Plan 2 Task 5: weekly Iceberg snapshot expiry (design D12,
+# ingest/src/alice_ingest/maintenance.py -- `table.maintenance
+# .expire_snapshots().older_than(...).commit()`, verified live against the
+# pinned pyiceberg 0.11.1; see maintenance.py's module docstring). Same
+# schedules-list/pipeline-runner/ttlStrategy pattern as ingest-nightly and
+# ingest-sitesonar above. Single-step (no DAG needed): one command iterates
+# every alice.* table itself (dynamic `catalog.list_tables`), so there is
+# nothing else for this Workflow to sequence.
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: ingest-maintenance
+  namespace: argo-workflows
+spec:
+  schedules: [{{ .Values.ingest.schedules.maintenance | quote }}]
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: pipeline-runner
+    entrypoint: main
+    ttlStrategy: {secondsAfterCompletion: 86400}
+    templates:
+      - name: main
+        container:
+          image: {{ .Values.images.ingest }}
+          envFrom:
+            - secretRef: {name: ingest-env}
+          args: ["run-maintenance"]

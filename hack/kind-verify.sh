@@ -118,12 +118,18 @@ else
 fi
 # Hard gate (probe pattern per Task 2/3 reviews) — Prometheus STS name is
 # discovered by label, never hardcoded (chart-generated name can change).
+# Extended (Plan 2 Task 5): also asserts WorkflowFailed (the new
+# `datalake-pipeline` PrometheusRule group, chart/templates/datalake-alerts.yaml)
+# loaded alongside the original `datalake` group's LandingDBXidAgeHigh --
+# proves BOTH groups in the same PrometheusRule resource hydrated, not just
+# whichever group happened to already be present before Task 5.
 PROM_STS=$(kubectl -n monitoring get sts -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}')
-if kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
-     wget -qO- 'http://localhost:9090/api/v1/rules' | grep -q LandingDBXidAgeHigh; then
-  echo "alert rules loaded"
+RULES_JSON=$(kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
+     wget -qO- 'http://localhost:9090/api/v1/rules')
+if echo "$RULES_JSON" | grep -q LandingDBXidAgeHigh && echo "$RULES_JSON" | grep -q WorkflowFailed; then
+  echo "alert rules loaded (datalake + datalake-pipeline groups)"
 else
-  echo "FAIL: datalake alert rules not loaded in Prometheus"; exit 1
+  echo "FAIL: datalake alert rules not loaded in Prometheus (LandingDBXidAgeHigh and/or WorkflowFailed missing)"; exit 1
 fi
 # Manual Workflow run using the same image the CronWorkflow uses (Task 7) --
 # the CronWorkflow itself ticks every 5m; this proves the pipeline-runner SA

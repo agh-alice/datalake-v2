@@ -105,3 +105,131 @@ spec:
               exactly this class of silent drift: a Dec-2023 image running
               in production instead of the repo's code.
             incident: E2
+
+    # Plan 2 Task 5 -- design D11's "minimum alert set" extended to the
+    # ingestion pipeline itself (deliverables/2026-07-12-datalake-v2-design.md,
+    # section 5: "workflow/CronWorkflow failure (E1); ... ingestion watermark
+    # lag >24h (E4)"). Metric names verified LIVE against the real
+    # argo-workflows-workflow-controller (chart argo-workflows v4,
+    # release 4.0.7) on this kind cluster, 2026-07-12 -- NOT from docs/memory:
+    # `kubectl -n argo-workflows exec deploy/argo-workflows-workflow-controller
+    # -- wget ...` failed (no wget/curl in that image); port-forwarded the
+    # controller's own Service instead (`argo-workflows-workflow-controller`,
+    # port 8080 -> containerPort 9090 named "metrics" -- verified via
+    # `kubectl get svc -o yaml`) and curled /metrics directly. Full label
+    # inventory of every metric carrying a workflow/cronworkflow `name=` label
+    # was enumerated too (`grep -E '\{[^}]*name='`): only
+    # argo_workflows_cronworkflows_triggered_total carries one. No per-workflow
+    # phase/succeeded/completion metric exists on this controller version.
+    # kube-state-metrics (monitoring-kube-state-metrics, also live in this
+    # cluster) was checked too and exposes nothing for the Workflow/
+    # CronWorkflow CRDs -- ruling out the brief's hypothesized
+    # "kube_job-style" fallback.
+    - name: datalake-pipeline
+      rules:
+        - alert: WorkflowFailed
+          expr: increase(argo_workflows_total_count{namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: An Argo Workflow in argo-workflows entered Failed/Error in the last hour
+            description: >-
+              argo_workflows_total_count{namespace,phase} is a per-namespace,
+              per-phase COUNTER (verified live against the controller's own
+              /metrics, 2026-07-12) -- increase() over 1h counts workflows
+              that TRANSITIONED into Failed or Error during that window,
+              which is what "entering Failed/Error in the last hour" means;
+              a gauge read (argo_workflows_gauge, also present but with NO
+              namespace label at all on this controller) would miss a
+              transition already reaped by ttlStrategy before the next
+              scrape, or hide which namespace it belonged to. Covers every
+              Workflow in ns argo-workflows: ingest-nightly (both its
+              run-nightly and run-retention steps -- see RetentionUnverifiedRows
+              below for one specific run-retention failure cause),
+              ingest-sitesonar, ingest-maintenance, and hello. E1 was
+              exactly the un-alerted failure class this closes: 68
+              consecutive nightly failures, unnoticed, because nothing
+              watched workflow/CronWorkflow outcomes
+              (deliverables/2026-07-12-datalake-v2-design.md, minimum alert
+              set: "workflow/CronWorkflow failure (E1)").
+            note: >-
+              phase="Error" has no time series until some workflow has
+              actually entered that phase at least once (Prometheus only
+              creates a series on first observation, verified live -- only
+              Failed/Running/Succeeded existed at verification time) --
+              absent is expected, not broken, until then.
+            incident: E1
+
+        - alert: IcebergIngestStale
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-nightly", namespace="argo-workflows"}[26h]) == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: ingest-nightly has not even been triggered in 26h
+            description: >-
+              argo_workflows_cronworkflows_triggered_total{name="ingest-nightly"}
+              is the ONLY controller metric carrying a per-CronWorkflow
+              `name` label (verified live, 2026-07-12 -- see this group's
+              header comment). It counts TRIGGERS, not successes, so this
+              expr detects "the 02:00 schedule stopped firing at all"
+              (controller down, CronWorkflow suspended/deleted/renamed, ns
+              issue) within a 26h window (24h nightly cadence + 2h buffer)
+              -- increase()==0 means zero triggers landed in that window.
+              It deliberately does NOT try to detect "triggered nightly but
+              every run failed" -- that is a DIFFERENT failure mode,
+              already covered within 1h (not 26h) by WorkflowFailed above,
+              since a failing ingest-nightly Workflow increments
+              argo_workflows_total_count{phase="Failed"} regardless of
+              which CronWorkflow spawned it, and no per-workflow-name
+              success/failure metric exists on this controller version to
+              scope that more tightly (verified live -- see header
+              comment). Together the two alerts split "pipeline didn't run
+              at all" (this one) from "pipeline ran and failed" (WorkflowFailed)
+              -- the most honest split obtainable from this controller
+              version's real metric label surface. Design's minimum alert
+              set: "ingestion watermark lag >24h (E4)" --
+              deliverables/2026-07-12-datalake-v2-design.md.
+            incident: E4
+
+        - alert: RetentionUnverifiedRows
+          expr: increase(argo_workflows_total_count{namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A pipeline workflow failed -- check whether retention's unverified>0 guard was the cause
+            description: >-
+              Deliberate no-new-components decision (Plan 2 Task 5): retention.py
+              (design D5, provenance E4/E6) exposes NO metric of its own --
+              a Pushgateway-fed unverified_count gauge was rejected because
+              it adds a new component to the platform purely to surface one
+              exit code. Instead, retention.run()'s exit_code()
+              (ingest/src/alice_ingest/retention.py) returns non-zero IF AND
+              ONLY IF total.unverified > 0 summed across every landing
+              table, which fails the run-retention container, which fails
+              the owning ingest-nightly Workflow -- the EXACT SAME
+              Failed-phase transition WorkflowFailed above already detects
+              (there is no per-workflow-name metric on this controller to
+              scope a narrower expr against, verified live -- see this
+              group's header comment). This alert therefore has NO
+              independent Prometheus signal: its expr is identical to
+              WorkflowFailed's, and it will always co-fire with
+              WorkflowFailed, never alone, for this specific cause among
+              the several WorkflowFailed's broader condition can match. It
+              exists as a separately named, runbook-linkable entry -- so
+              "retention's safety net tripped" is discoverable by name --
+              rather than folding this failure mode silently into
+              WorkflowFailed's generic text. To CONFIRM unverified>0 was the
+              actual cause (vs. a different workflow, or ingest-nightly's
+              run-nightly step, failing instead), check the failed
+              run-retention pod's logs for the `RETENTION kept=<n>
+              deleted=<n> unverified=<n>` summary line (unverified>0) or a
+              per-table `RETENTION table=<t> ... unverified=<n>` line
+              (retention.py's format_summary()/run()). unverified>0 means
+              old landing rows exist that retention could NOT verify are
+              safely replicated to Iceberg yet -- retention kept them
+              rather than risk E4's class of data loss (deleting rows an
+              interrupted/lagging ingest never finished writing).
+            incident: E4

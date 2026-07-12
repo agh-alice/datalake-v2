@@ -14,7 +14,12 @@ from __future__ import annotations
 import json
 import lzma
 
-from alice_ingest.sitesonar import fetch_and_parse, list_source_files
+from alice_ingest.sitesonar import (
+    _iter_rows,
+    fetch_and_parse,
+    list_source_files,
+    select_files_to_fetch,
+)
 
 # A trimmed real excerpt of the directory listing's HTML shape, verified
 # live against http://alimonitor.cern.ch/download/kalana/ (2026-07-12,
@@ -160,3 +165,192 @@ class TestFetchAndParse:
 
         assert result == [row]
         assert result[0]["test_results_json"]["os"]["OS_NAME"] == "Red Hat"
+
+
+# ---------------------------------------------------------------------------
+# High-water-mark file skip (Plan 2 Task 5 -- scoped in from the P2T4 review:
+# already-processed .out.xz files must be SKIPPED, not re-downloaded, on
+# subsequent runs). TDD: list-in -> fetch-list-out given a high-water mark.
+# ---------------------------------------------------------------------------
+
+
+class TestSelectFilesToFetch:
+    """Pure filter: files whose filename-embedded epoch is already <= the
+    high-water mark have already been fetched by a prior run and must be
+    excluded. Strictly-greater-than: a file AT the high-water mark was the
+    last one fetched, not a new one."""
+
+    def test_initial_high_water_mark_of_zero_selects_every_file(self):
+        files = [(300, "u3"), (200, "u2"), (100, "u1")]
+
+        assert select_files_to_fetch(files, high_water_mark=0) == files
+
+    def test_only_files_strictly_newer_than_the_high_water_mark_are_selected(self):
+        files = [(300, "u3"), (200, "u2"), (100, "u1")]
+
+        result = select_files_to_fetch(files, high_water_mark=200)
+
+        assert result == [(300, "u3")]
+
+    def test_file_exactly_at_the_high_water_mark_is_excluded_not_reselected(self):
+        files = [(200, "u2"), (100, "u1")]
+
+        assert select_files_to_fetch(files, high_water_mark=200) == []
+
+    def test_high_water_mark_at_or_above_every_epoch_selects_nothing(self):
+        files = [(300, "u3"), (200, "u2")]
+
+        assert select_files_to_fetch(files, high_water_mark=999) == []
+
+    def test_preserves_the_most_recent_first_ordering(self):
+        files = [(300, "u3"), (250, "u25"), (200, "u2")]
+
+        result = select_files_to_fetch(files, high_water_mark=150)
+
+        assert result == files  # order untouched, all three qualify
+
+    def test_empty_file_list_selects_nothing(self):
+        assert select_files_to_fetch([], high_water_mark=0) == []
+
+
+class FakeMultiUrlSession:
+    """Unlike FakeSession (one canned response for any URL), this fake
+    routes .get() by URL -- needed to simulate the listing page (base_url)
+    and N distinct per-file .out.xz responses in the same test."""
+
+    def __init__(self, responses: dict[str, "FakeResponse"]):
+        self._responses = responses
+        self.requested_urls: list[str] = []
+
+    def get(self, url, timeout=None):
+        self.requested_urls.append(url)
+        return self._responses[url]
+
+
+BASE_URL = "http://alimonitor.cern.ch/download/kalana/"
+
+
+def _listing_html(epochs: list[int]) -> str:
+    rows = "\n".join(
+        f'<a href="/download/kalana/site-sonar-{epoch}.out.xz">'
+        f"<tt>site-sonar-{epoch}.out.xz</tt></a>"
+        for epoch in epochs
+    )
+    return f"<html><body><table><tbody>{rows}</tbody></table></body></html>"
+
+
+def _file_response(epoch: int, host_suffix: str = "") -> "FakeResponse":
+    row = {"host_id": epoch, "hostname": f"h{epoch}{host_suffix}.cern.ch", "last_updated": epoch}
+    return FakeResponse(_lzma_jsonlines([row]))
+
+
+class TestIterRowsHighWaterMark:
+    """`_iter_rows` wires `select_files_to_fetch` against a caller-supplied
+    `state` dict (production: `dlt.current.resource_state()`, per
+    sitesonar.py's module docstring; a plain dict here -- same fake-able
+    seam convention as retention.py's Protocol-based catalog fakes) and
+    advances `state["high_water_mark"]` after a successful pass over
+    whichever files were selected."""
+
+    def test_first_run_with_empty_state_fetches_every_listed_file(self):
+        listing_url = BASE_URL
+        file_100 = f"{BASE_URL}site-sonar-100.out.xz"
+        file_200 = f"{BASE_URL}site-sonar-200.out.xz"
+        session = FakeMultiUrlSession(
+            {
+                listing_url: FakeResponse(_listing_html([100, 200]).encode()),
+                file_100: _file_response(100),
+                file_200: _file_response(200),
+            }
+        )
+        # listing response must be .text-capable (requests.Response API);
+        # FakeResponse only has .content -- patch a .text attr for this test.
+        session._responses[listing_url].text = _listing_html([100, 200])
+
+        state: dict = {}
+        rows = list(_iter_rows(BASE_URL, None, session, state))
+
+        assert {r["host_id"] for r in rows} == {100, 200}
+        assert state["high_water_mark"] == 200
+
+    def test_second_run_with_state_at_max_epoch_downloads_nothing(self):
+        listing_url = BASE_URL
+        session = FakeMultiUrlSession(
+            {listing_url: FakeResponse(b"", status=200)},
+        )
+        session._responses[listing_url].text = _listing_html([100, 200])
+
+        state = {"high_water_mark": 200}
+        rows = list(_iter_rows(BASE_URL, None, session, state))
+
+        assert rows == []
+        # Only the listing page itself was requested -- no per-file .out.xz
+        # download happened (the skip -- proves files are not re-fetched).
+        assert session.requested_urls == [listing_url]
+        assert state["high_water_mark"] == 200  # unchanged, nothing new fetched
+
+    def test_partial_run_only_fetches_files_newer_than_the_high_water_mark(self):
+        listing_url = BASE_URL
+        file_300 = f"{BASE_URL}site-sonar-300.out.xz"
+        session = FakeMultiUrlSession(
+            {
+                listing_url: FakeResponse(b""),
+                file_300: _file_response(300),
+            }
+        )
+        session._responses[listing_url].text = _listing_html([300, 200, 100])
+
+        state = {"high_water_mark": 200}
+        rows = list(_iter_rows(BASE_URL, None, session, state))
+
+        assert {r["host_id"] for r in rows} == {300}
+        assert session.requested_urls == [listing_url, file_300]
+        assert state["high_water_mark"] == 300
+
+    def test_limit_caps_the_new_files_not_the_full_listing(self):
+        # Two files are new (300, 250); --limit 1 must fetch only the more
+        # recent of the NEW ones, not just "the first file in the listing".
+        listing_url = BASE_URL
+        file_300 = f"{BASE_URL}site-sonar-300.out.xz"
+        session = FakeMultiUrlSession(
+            {
+                listing_url: FakeResponse(b""),
+                file_300: _file_response(300),
+            }
+        )
+        session._responses[listing_url].text = _listing_html([300, 250, 200])
+
+        state = {"high_water_mark": 200}
+        rows = list(_iter_rows(BASE_URL, limit=1, session=session, state=state))
+
+        assert {r["host_id"] for r in rows} == {300}
+        assert file_300 in session.requested_urls
+        assert state["high_water_mark"] == 300
+
+    def test_a_run_that_fetches_nothing_new_leaves_state_absent_key_untouched(self):
+        # No prior state key at all (very first run of a brand new
+        # pipeline) combined with an empty listing -- must not crash on
+        # state.get() and must not fabricate a high_water_mark of 0.
+        listing_url = BASE_URL
+        session = FakeMultiUrlSession({listing_url: FakeResponse(b"")})
+        session._responses[listing_url].text = "<html><body>empty</body></html>"
+
+        state: dict = {}
+        rows = list(_iter_rows(BASE_URL, None, session, state))
+
+        assert rows == []
+        assert "high_water_mark" not in state
+
+    def test_logs_skip_evidence(self, capsys):
+        listing_url = BASE_URL
+        session = FakeMultiUrlSession({listing_url: FakeResponse(b"")})
+        session._responses[listing_url].text = _listing_html([100, 200])
+
+        state = {"high_water_mark": 200}
+        list(_iter_rows(BASE_URL, None, session, state))
+
+        out = capsys.readouterr().out
+        assert "SITESONAR" in out
+        assert "high_water_mark=200" in out
+        assert "files_already_processed_skipped=2" in out
+        assert "files_to_fetch=0" in out
