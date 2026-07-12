@@ -130,7 +130,7 @@ metadata:
 spec:
   concurrencyPolicy: Forbid
   schedules:
-    - '*/15 * * * *'
+    - 0 */6 * * *
   workflowSpec:
     entrypoint: main
     serviceAccountName: pipeline-runner
@@ -150,7 +150,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:26d95243d4d79246215ea71bfd37e25a2b905b53e0817f9b9d30fcff30927ed8
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:f4747a640259cc561c7a2c8c15b1644641b695626f54eb816453bdba8107b6aa
         name: run-nightly
       - container:
           args:
@@ -158,7 +158,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:26d95243d4d79246215ea71bfd37e25a2b905b53e0817f9b9d30fcff30927ed8
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:f4747a640259cc561c7a2c8c15b1644641b695626f54eb816453bdba8107b6aa
         name: run-retention
     ttlStrategy:
       secondsAfterCompletion: 86400
@@ -171,7 +171,7 @@ metadata:
 spec:
   concurrencyPolicy: Forbid
   schedules:
-    - '*/20 * * * *'
+    - 30 */6 * * *
   workflowSpec:
     entrypoint: main
     serviceAccountName: pipeline-runner
@@ -182,7 +182,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:26d95243d4d79246215ea71bfd37e25a2b905b53e0817f9b9d30fcff30927ed8
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:f4747a640259cc561c7a2c8c15b1644641b695626f54eb816453bdba8107b6aa
         name: main
     ttlStrategy:
       secondsAfterCompletion: 86400
