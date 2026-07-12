@@ -99,10 +99,17 @@ spec:
         #   https://trino.io/docs/current/object-storage/metastores.html
         #     (REST catalog property table: iceberg.rest-catalog.uri,
         #     .warehouse, .security, .oauth2.token, .vended-credentials-enabled)
-        #   https://trino.io/docs/current/object-storage/file-system-s3.html
-        #     (fs.s3.enabled, s3.endpoint, s3.region, s3.path-style-access --
-        #     confirmed this is still `fs.s3.enabled`, not a renamed
-        #     `fs.native-s3.enabled`, on Trino 480/481 docs)
+        #   https://trino.io/docs/476/object-storage/file-system-s3.html --
+        #     VERSION-PINNED docs, not /current/: the first live deploy
+        #     attempt (against the "current" docs' `fs.s3.enabled`) failed
+        #     coordinator startup with `Configuration property
+        #     'fs.s3.enabled' was not used` (Airlift strict config
+        #     validation, kubectl logs verified live). Trino 476's own
+        #     versioned docs confirm the property is still named
+        #     `fs.native-s3.enabled` at this version -- the `fs.s3.enabled`
+        #     rename happened in a later release than 476. s3.endpoint,
+        #     s3.region, s3.path-style-access are unchanged between the two
+        #     doc versions.
         #   https://trino.io/docs/current/connector/postgresql.html
         #     (connector.name=postgresql, connection-url, connection-user,
         #     connection-password)
@@ -133,7 +140,7 @@ spec:
             iceberg.rest-catalog.security=OAUTH2
             iceberg.rest-catalog.oauth2.token=dummy
             iceberg.rest-catalog.vended-credentials-enabled=true
-            fs.s3.enabled=true
+            fs.native-s3.enabled=true
             s3.endpoint=http://minio.minio.svc:9000
             s3.region=local-01
             s3.path-style-access=true
