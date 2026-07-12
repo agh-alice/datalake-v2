@@ -16,6 +16,8 @@ component. `LandingDBXidAgeHigh` (`chart/templates/datalake-alerts.yaml`)
 fires at `cnpg_pg_database_xid_age > 1e9` for 30m specifically so this class
 of incident is caught early instead of silently, as it was in Gen-1.
 
+**Source:** The complete technical incident record and recovery procedure are documented in `alice-datalake-pepeline-redesign/research/2026-07-11_cluster-state-diagnosis.md`, section "The XID-wraparound incident and recovery (2026-07-12)". See also design doc E4 for context on the Gen-1 incident.
+
 ## Symptom
 
 Writes (and eventually all new transactions) fail with:
@@ -97,6 +99,8 @@ starting — don't wait for the hard-stop error.
    ```
 
 ## Recovery
+
+**⚠️ CRITICAL FIRST STEP:** Pause or scale down the MLClient writing process (or any other persistent client creating session-scoped temp tables) BEFORE terminating its backend connection. Persistent connections will immediately reconnect and re-occupy the backend slot, masking the orphaned temp tables from autovacuum's cleanup and keeping them pinned to the old XID horizon.
 
 1. **Terminate and drop the orphans.** If the offending backend is still
    connected, terminate it first, then drop its temp tables (superusers can
