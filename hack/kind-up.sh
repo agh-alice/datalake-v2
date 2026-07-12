@@ -40,7 +40,18 @@ kubectl create namespace lakekeeper --dry-run=client -o yaml | kubectl apply -f 
 kubectl -n lakekeeper get secret lakekeeper-pg-encryption >/dev/null 2>&1 || \
   kubectl -n lakekeeper create secret generic lakekeeper-pg-encryption \
     --from-literal=encryptionKey="$(openssl rand -hex 32)"
+# MinIO root credentials: harness-generated throwaway, random per kind cluster
+# (never in Git; MinIO itself is kind-only -- no cyfronet equivalent). Keys
+# rootUser/rootPassword are the chart's existingSecret contract (Task 1).
+kubectl create namespace minio --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n minio get secret minio-creds >/dev/null 2>&1 || \
+  kubectl -n minio create secret generic minio-creds \
+    --from-literal=rootUser="$(openssl rand -hex 16)" \
+    --from-literal=rootPassword="$(openssl rand -hex 16)"
 kubectl apply -f apps/project.yaml
 [ -d apps/infra ] && ls apps/infra/*.yaml >/dev/null 2>&1 && kubectl apply -f apps/infra/
 kubectl apply -f environments/kind/apps/
+# Warehouse bootstrap: idempotent, self-guards on lakekeeper Service
+# readiness internally (Task 1) -- no separate wait needed here.
+hack/lakekeeper-warehouse.sh
 echo "kind + ArgoCD (hydrator) + apps ready"

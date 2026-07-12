@@ -11,11 +11,14 @@ set -euo pipefail
 # cloudnative-pg / external-secrets / monitoring provide CRDs (Cluster,
 # ExternalSecret/ClusterSecretStore, ServiceMonitor/PodMonitor/PrometheusRule)
 # consumed by lakekeeper, argo-workflows and datalake-kind's chart templates.
-# datalake-kind is checked last -- it renders resources (PrometheusRule,
-# ServiceMonitor, CNPG Clusters, ExternalSecrets) that depend on every other
-# app's CRDs. workflows-rbac is a chart template (SA/Role/RoleBinding), not
-# an Application, so it has no separate entry here.
-EXPECTED_APPS=(cloudnative-pg external-secrets monitoring lakekeeper argo-workflows datalake-kind)   # extended by later tasks
+# minio has no CRD relationship to anything -- it's placed before lakekeeper
+# only because the warehouse hard-gate below (which needs lakekeeper AND
+# minio up) reads more naturally right after both have been probed Healthy
+# (Task 1, Plan 2). datalake-kind is checked last -- it renders resources
+# (PrometheusRule, ServiceMonitor, CNPG Clusters, ExternalSecrets) that
+# depend on every other app's CRDs. workflows-rbac is a chart template
+# (SA/Role/RoleBinding), not an Application, so it has no separate entry here.
+EXPECTED_APPS=(cloudnative-pg external-secrets monitoring minio lakekeeper argo-workflows datalake-kind)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -93,6 +96,25 @@ if echo "$REST_CODE" | grep -qE "^[234]"; then
   echo "lakekeeper REST endpoint reachable"
 else
   echo "FAIL: lakekeeper REST endpoint unreachable (got: '$REST_CODE')"; exit 1
+fi
+# Hard gate (Task 1, Plan 2): the `default` warehouse must exist -- proves
+# hack/lakekeeper-warehouse.sh actually ran and Lakekeeper accepted the
+# MinIO-backed storage profile, not just that the REST endpoint answers.
+# Same create/poll/logs/delete pattern as the probe above.
+kubectl -n lakekeeper delete pod warehouse-probe --ignore-not-found >/dev/null 2>&1
+kubectl -n lakekeeper run warehouse-probe --restart=Never --image=curlimages/curl -- \
+  sh -c 'curl -s -H "Authorization: Bearer dummy" http://lakekeeper.lakekeeper.svc:8181/management/v1/warehouse' >/dev/null
+for i in $(seq 1 30); do
+  phase=$(kubectl -n lakekeeper get pod warehouse-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 2
+done
+WH_LIST=$(kubectl -n lakekeeper logs warehouse-probe 2>/dev/null || echo "")
+kubectl -n lakekeeper delete pod warehouse-probe --ignore-not-found >/dev/null 2>&1
+if echo "$WH_LIST" | grep -q '"name":"default"'; then
+  echo "lakekeeper warehouse 'default' present"
+else
+  echo "FAIL: lakekeeper warehouse 'default' not found (got: '$WH_LIST')"; exit 1
 fi
 # Hard gate (probe pattern per Task 2/3 reviews) — Prometheus STS name is
 # discovered by label, never hardcoded (chart-generated name can change).

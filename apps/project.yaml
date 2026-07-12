@@ -12,6 +12,7 @@ spec:
     - https://prometheus-community.github.io/helm-charts
     - https://argoproj.github.io/argo-helm
     - https://lakekeeper.github.io/lakekeeper-charts/
+    - https://charts.min.io/
   destinations:
     - namespace: '*'
       server: https://kubernetes.default.svc
