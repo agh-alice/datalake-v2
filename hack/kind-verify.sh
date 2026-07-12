@@ -18,7 +18,14 @@ set -euo pipefail
 # (PrometheusRule, ServiceMonitor, CNPG Clusters, ExternalSecrets) that
 # depend on every other app's CRDs. workflows-rbac is a chart template
 # (SA/Role/RoleBinding), not an Application, so it has no separate entry here.
-EXPECTED_APPS=(cloudnative-pg external-secrets monitoring minio lakekeeper argo-workflows datalake-kind)   # extended by later tasks
+# trino (Plan 3 Task 1) inserted right before datalake-kind: it consumes
+# lakekeeper's REST catalog and landing-db's mon-data Cluster (the latter is
+# rendered BY datalake-kind, but that dependency is on the Cluster object
+# existing, not on datalake-kind's Application being Synced/Healthy -- CNPG
+# creates the Cluster as soon as the chart's manifests land, regardless of
+# the parent Application's own health rollup) -- datalake-kind itself still
+# has to stay last for the reason in the note above.
+EXPECTED_APPS=(cloudnative-pg external-secrets monitoring minio lakekeeper argo-workflows trino datalake-kind)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -273,6 +280,97 @@ if [ "$phase" = "Succeeded" ] && echo "$PROBE_LOG" | grep -q "iceberg-contents-p
   echo "iceberg contents OK (job_info >=900 rows, mon_jdls_parsed jdl__lpm_pass_name present and jdl__lpmpassname absent, jdl__packages column present and no mon_jdls_parsed__* child tables)"
 else
   echo "FAIL: iceberg-contents-probe phase=$phase"; exit 1
+fi
+# Hard gate (Plan 3 Task 1): Trino query probes. Everything above proves the
+# lakehouse (Iceberg/Lakekeeper/MinIO) and the landing DB (mon-data) are
+# each independently correct; this proves Trino's SQL layer actually
+# federates both -- `lake.alice.job_info` (Iceberg REST catalog, vended
+# creds) and `landing.public.job_info` (PostgreSQL connector, the
+# `trino_ro` read-only role from hack/kind-up.sh).
+#
+# Reuses the ingest image (already resolved above as $INGEST_IMAGE) rather
+# than curlimages/curl: the Trino REST client protocol
+# (https://trino.io/docs/current/develop/client-protocol.html) requires
+# following `nextUri` across possibly-several polls before `data` appears
+# (state QUEUED/RUNNING -> FINISHED), which is impractical to parse
+# reliably with grep/sed the way the simpler single-shot lakekeeper probes
+# above do -- the ingest image already ships `requests` (pinned, no new
+# dep, same library Task 2's Trino client will reuse). No envFrom secret
+# needed: the probe is a plain Trino SQL client hitting the coordinator's
+# HTTP API with an arbitrary X-Trino-User header -- Trino itself holds the
+# landing-ro credentials server-side via envFrom + `${ENV:...}` (see
+# apps/infra/trino.yaml), the querying client never sees them.
+kubectl -n trino delete pod trino-query-probe --ignore-not-found >/dev/null 2>&1
+cat <<PODYAML | kubectl -n trino apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: trino-query-probe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: $INGEST_IMAGE
+      command:
+        - python
+        - -c
+        - |
+          import sys, time
+          import requests
+
+          TRINO = "http://trino.trino.svc:8080"
+          HEADERS = {"X-Trino-User": "kind-verify", "Content-Type": "text/plain"}
+
+          def run_query(sql, attempts=20, delay=15):
+              last_err = None
+              for attempt in range(1, attempts + 1):
+                  try:
+                      resp = requests.post(f"{TRINO}/v1/statement", data=sql, headers=HEADERS, timeout=30)
+                      resp.raise_for_status()
+                      result = resp.json()
+                      rows = []
+                      while True:
+                          if "error" in result:
+                              raise RuntimeError(f"query error: {result['error']}")
+                          rows.extend(result.get("data") or [])
+                          next_uri = result.get("nextUri")
+                          if not next_uri:
+                              return rows
+                          time.sleep(1)
+                          resp = requests.get(next_uri, timeout=30)
+                          resp.raise_for_status()
+                          result = resp.json()
+                  except Exception as exc:  # noqa: BLE001 -- coordinator may still be warming up
+                      last_err = exc
+                      print(f"query attempt {attempt}/{attempts} failed: {exc}; retrying in {delay}s")
+                      time.sleep(delay)
+              raise RuntimeError(f"query never succeeded after {attempts} attempts: {last_err}")
+
+          lake_rows = run_query("SELECT count(*) FROM lake.alice.job_info")
+          lake_count = lake_rows[0][0]
+          print(f"lake.alice.job_info count={lake_count}")
+          if lake_count < 900:
+              print(f"FAIL: lake.alice.job_info count {lake_count} < 900")
+              sys.exit(1)
+
+          landing_rows = run_query("SELECT count(*) FROM landing.public.job_info")
+          print(f"landing.public.job_info count={landing_rows[0][0]}")
+
+          print("trino-query-probe: OK")
+PODYAML
+phase=""
+for i in $(seq 1 60); do
+  phase=$(kubectl -n trino get pod trino-query-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 10
+done
+TRINO_PROBE_LOG=$(kubectl -n trino logs trino-query-probe 2>/dev/null || echo "")
+kubectl -n trino delete pod trino-query-probe --ignore-not-found >/dev/null 2>&1
+echo "$TRINO_PROBE_LOG"
+if [ "$phase" = "Succeeded" ] && echo "$TRINO_PROBE_LOG" | grep -q "trino-query-probe: OK"; then
+  echo "trino query probes OK (lake.alice.job_info >=900 rows, landing.public.job_info SELECT succeeds)"
+else
+  echo "FAIL: trino-query-probe phase=$phase"; exit 1
 fi
 # Banner moved here (final review R1): this must be the LAST line of the
 # script. It used to print before the workflow probe above, so a log reader

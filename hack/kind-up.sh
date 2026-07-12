@@ -131,4 +131,67 @@ else
     --from-literal=SITESONAR_LIMIT="5"
   echo "ingest-env secret created"
 fi
+# Landing read-only role for Trino's `landing` catalog (Plan 3 Task 1):
+# role `trino_ro`, LOGIN + SELECT-only against mon_data's public schema,
+# created idempotently via the same CNPG superuser exec pattern as
+# hack/seed-fixture.sh / kind-verify.sh's landing-db probe -- primary
+# resolved via Cluster.status.currentPrimary, never pinned to `-1`
+# (failover breaks a pinned name). Secret `trino/landing-ro` carries the
+# SAME generated password Trino's `landing` catalog consumes via envFrom +
+# `${ENV:LANDING_RO_USER}`/`${ENV:LANDING_RO_PASSWORD}` substitution
+# (apps/infra/trino.yaml) -- harness-generated, never in Git, same
+# create-if-absent idempotency as the other harness secrets above.
+# Cyfronet: ExternalSecret sources the equivalent Secret out-of-band
+# (runbook note, Plan 4).
+#
+# Runs BEFORE hack/seed-fixture.sh in the documented acceptance sequence
+# (kind-up -> seed-fixture -> run-ingest-once -> kind-verify), so
+# `job_info`/`trace`/`mon_jdls` don't exist in mon_data yet at this point --
+# the immediate `GRANT ... ON ALL TABLES` below is a harmless no-op on a
+# fresh cluster. What actually grants access to the fixture's own tables is
+# `ALTER DEFAULT PRIVILEGES`: seed-fixture.sh creates those tables as
+# `postgres` (later reassigning ownership to mon_user -- ownership changes
+# do not revoke privileges already granted at creation time), and we
+# connect as `-U postgres` here too, so `ALTER DEFAULT PRIVILEGES ... GRANT
+# ...` implicitly scopes to "objects postgres creates from now on" with no
+# `FOR ROLE` qualifier needed -- exactly matching seed-fixture.sh's own
+# CREATE TABLE role. Both statements are kept (belt-and-suspenders) so a
+# kind-up.sh rerun against an already-seeded cluster still grants on
+# whatever tables exist at that moment, not just future ones.
+kubectl create namespace trino --dry-run=client -o yaml | kubectl apply -f -
+if kubectl -n trino get secret landing-ro >/dev/null 2>&1; then
+  LANDING_RO_PASSWORD=$(kubectl -n trino get secret landing-ro -o jsonpath='{.data.LANDING_RO_PASSWORD}' | base64 -d)
+  echo "landing-ro secret already exists; reusing its password to keep the DB role in sync"
+else
+  LANDING_RO_PASSWORD="$(openssl rand -hex 16)"
+fi
+i=0
+MD_PRIMARY=""
+while [ -z "$MD_PRIMARY" ]; do
+  MD_PRIMARY=$(kubectl -n landing-db get cluster mon-data -o jsonpath='{.status.currentPrimary}' 2>/dev/null || echo "")
+  [ -n "$MD_PRIMARY" ] && break
+  i=$((i + 1))
+  [ "$i" -gt 60 ] && { echo "FAIL: mon-data currentPrimary not set after 5m"; exit 1; }
+  sleep 5
+done
+kubectl -n landing-db exec "$MD_PRIMARY" -- psql -U postgres -d mon_data -v ON_ERROR_STOP=1 -c "
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'trino_ro') THEN
+    CREATE ROLE trino_ro LOGIN PASSWORD '${LANDING_RO_PASSWORD}';
+  ELSE
+    ALTER ROLE trino_ro LOGIN PASSWORD '${LANDING_RO_PASSWORD}';
+  END IF;
+END
+\$\$;
+GRANT CONNECT ON DATABASE mon_data TO trino_ro;
+GRANT USAGE ON SCHEMA public TO trino_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO trino_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO trino_ro;
+"
+kubectl -n trino create secret generic landing-ro \
+  --from-literal=LANDING_RO_USER=trino_ro \
+  --from-literal=LANDING_RO_PASSWORD="$LANDING_RO_PASSWORD" \
+  --dry-run=client -o yaml | kubectl apply -f -
+echo "landing-ro role + secret ready"
 echo "kind + ArgoCD (hydrator) + apps ready"

@@ -1,0 +1,132 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: trino
+  namespace: argocd
+  # Wave 3: after lakekeeper (wave 2, provides the REST catalog Trino's
+  # `lake` catalog points at) and cloudnative-pg/external-secrets (wave 0).
+  # Not a hard requirement for the coordinator pod to start (Trino loads
+  # catalogs lazily; a query against `lake` before Lakekeeper answers just
+  # fails, it doesn't crash-loop the coordinator) but keeps the dependency
+  # ordering explicit and matches the repo's existing convention (Task 1
+  # verify-first: read every other apps/infra/*.yaml wave annotation before
+  # picking this one).
+  annotations: {argocd.argoproj.io/sync-wave: "3"}
+spec:
+  project: datalake
+  source:
+    # Pin verified live (Task 1, Plan 3): `helm repo add trino
+    # https://trinodb.github.io/charts && helm search repo trino/trino
+    # --versions | head -3` -> newest is chart 1.42.2 / appVersion 480
+    # (Trino 480). repoURL below is byte-identical to what `helm repo add`
+    # actually registered (`helm repo list` echoed back the same string,
+    # no trailing slash) and to apps/project.yaml's sourceRepos entry.
+    repoURL: https://trinodb.github.io/charts
+    chart: trino
+    targetRevision: "1.42.2"
+    helm:
+      valuesObject:
+        # Coordinator-only on kind (resource-frugality constraint, JVM heap
+        # <= 2G). `server.workers: 0` is not merely "zero replicas" -- the
+        # chart's deployment-worker.yaml/configmap-worker.yaml templates are
+        # wrapped in `{{- if or .Values.server.keda.enabled (gt (int
+        # .Values.server.workers) 0) }}`, so 0 (with keda left disabled,
+        # the default) renders NO worker Deployment/ConfigMap at all
+        # (verified against the pulled chart's templates, not the values
+        # doc comments alone).
+        server:
+          workers: 0
+        coordinator:
+          config:
+            # Load-bearing for coordinator-only mode: without this the
+            # coordinator refuses to schedule query fragments anywhere
+            # (default false assumes dedicated workers exist) and every
+            # query hangs. Verified by reading configmap-coordinator.yaml's
+            # rendered config.properties: `node-scheduler.include-coordinator=
+            # {{ .Values.coordinator.config.nodeScheduler.includeCoordinator }}`.
+            nodeScheduler:
+              includeCoordinator: true
+          jvm:
+            maxHeapSize: "2G"
+          # Modest, explicit requests (resource-frugality constraint) --
+          # the chart deliberately ships `resources: {}` by default "to
+          # increase chances charts run on environments with little
+          # resources" (chart's own values.yaml comment); we set them
+          # anyway since the constraint asks for it. Memory limit is above
+          # the 2G heap to leave room for off-heap/metaspace/native memory
+          # (standard JVM container sizing headroom), not because the kind
+          # node is short on memory (57Gi allocatable, <2% used at Task-1
+          # time -- `kubectl describe node` -- disk, not memory, is this
+          # cluster's scarce resource).
+          resources:
+            requests: {cpu: 250m, memory: 1536Mi}
+            limits: {memory: 3Gi}
+        # Injects the `landing` catalog's PostgreSQL credentials as env vars
+        # (LANDING_RO_USER/LANDING_RO_PASSWORD) on the coordinator pod. The
+        # Secret `landing-ro` (ns trino) is harness-provisioned by
+        # hack/kind-up.sh -- CNPG superuser exec creates role `trino_ro`
+        # (LOGIN, SELECT-only) in mon-data, then a k8s Secret carries the
+        # same generated password. NO plaintext password lives here or in
+        # the `landing` catalog properties below -- see the `${ENV:...}`
+        # substitution note there.
+        envFrom:
+          - secretRef:
+              name: landing-ro
+        # Catalog property names verified against the PINNED chart/Trino
+        # version's own docs (Task 1, Plan 3 -- not assumed from memory):
+        #   https://trino.io/docs/current/object-storage/metastores.html
+        #     (REST catalog property table: iceberg.rest-catalog.uri,
+        #     .warehouse, .security, .oauth2.token, .vended-credentials-enabled)
+        #   https://trino.io/docs/current/object-storage/file-system-s3.html
+        #     (fs.s3.enabled, s3.endpoint, s3.region, s3.path-style-access --
+        #     confirmed this is still `fs.s3.enabled`, not a renamed
+        #     `fs.native-s3.enabled`, on Trino 480/481 docs)
+        #   https://trino.io/docs/current/connector/postgresql.html
+        #     (connector.name=postgresql, connection-url, connection-user,
+        #     connection-password)
+        #   https://trino.io/docs/current/security/secrets.html
+        #     (`${ENV:VAR}` substitution works in catalog properties files,
+        #     no extra config flag needed -- resolved by Trino at property-
+        #     load time, so the ConfigMap this renders into never holds the
+        #     real landing-DB password, only the literal token `${ENV:...}`)
+        #   Lakekeeper's own Trino recipe (docs.lakekeeper.io/docs/nightly/
+        #   engines/) cross-confirmed the same REST catalog property names
+        #   end to end.
+        catalogs:
+          # Iceberg REST catalog -> Lakekeeper, warehouse `default`
+          # (bootstrapped by hack/lakekeeper-warehouse.sh, Plan 2 Task 1).
+          # OAUTH2 + a static token is Lakekeeper open-auth's documented
+          # shape: ANY bearer token is accepted (no real auth on kind), so
+          # the literal `dummy` here is not a secret -- same convention
+          # already committed in hack/lakekeeper-warehouse.sh's own
+          # `Authorization: Bearer dummy` header.
+          # vended-credentials-enabled=true: Lakekeeper vends short-lived S3
+          # STS credentials per request (proven for writes in Plan 2 Task 1)
+          # -- no static MinIO access/secret key appears here at all.
+          lake: |
+            connector.name=iceberg
+            iceberg.catalog.type=rest
+            iceberg.rest-catalog.uri=http://lakekeeper.lakekeeper.svc:8181/catalog
+            iceberg.rest-catalog.warehouse=default
+            iceberg.rest-catalog.security=OAUTH2
+            iceberg.rest-catalog.oauth2.token=dummy
+            iceberg.rest-catalog.vended-credentials-enabled=true
+            fs.s3.enabled=true
+            s3.endpoint=http://minio.minio.svc:9000
+            s3.region=local-01
+            s3.path-style-access=true
+          # PostgreSQL federation -> mon-data (landing-db namespace),
+          # read-only role `trino_ro` (hack/kind-up.sh). `${ENV:...}` is
+          # Trino's own secrets-substitution syntax (not Go-template `{{ }}`,
+          # so Helm's `tpl` pass on this string leaves it untouched) --
+          # resolved from the envFrom-injected LANDING_RO_USER/
+          # LANDING_RO_PASSWORD env vars at Trino property-load time.
+          landing: |
+            connector.name=postgresql
+            connection-url=jdbc:postgresql://mon-data-rw.landing-db.svc:5432/mon_data
+            connection-user=${ENV:LANDING_RO_USER}
+            connection-password=${ENV:LANDING_RO_PASSWORD}
+  destination: {server: https://kubernetes.default.svc, namespace: trino}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true]

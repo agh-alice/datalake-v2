@@ -13,6 +13,7 @@ spec:
     - https://argoproj.github.io/argo-helm
     - https://lakekeeper.github.io/lakekeeper-charts/
     - https://charts.min.io/
+    - https://trinodb.github.io/charts
   destinations:
     - namespace: '*'
       server: https://kubernetes.default.svc
