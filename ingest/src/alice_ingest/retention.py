@@ -245,9 +245,47 @@ def retain_table(
     table: RetentionTable,
     cutoffs: Mapping[str, datetime],
 ) -> TableResult:
-    """select_old_job_ids + classify_and_delete for one table."""
+    """select_old_job_ids + classify_and_delete for a SINGLE table in
+    isolation. Do not loop this over TABLES to retain multiple tables in
+    one run -- see run_retention_pass()'s docstring for why that ordering
+    is unsafe when one table's age predicate joins to another's."""
     old_job_ids = select_old_job_ids(conn, table, cutoffs)
     return classify_and_delete(conn, presence_catalog, table, old_job_ids)
+
+
+def run_retention_pass(
+    conn,
+    presence_catalog: IcebergPresenceCatalog,
+    cutoffs: Mapping[str, datetime],
+) -> dict[str, TableResult]:
+    """Two-phase retention across every table in TABLES: first collect
+    EVERY table's old-job-id candidate set (SELECTs only, no deletes),
+    THEN verify+delete each table.
+
+    This ordering is load-bearing, not cosmetic. `mon_jdls` has no
+    timestamp of its own -- its age predicate JOINs to `job_info.
+    last_update` (module docstring). Found empirically (Plan 2 Task 4,
+    first live nightly CronWorkflow trigger against the kind fixture):
+    processing tables one-at-a-time end-to-end (select THEN delete THEN
+    move to the next table) deleted job_info's 528 old+verified rows
+    correctly, but then mon_jdls's join-based SELECT ran against a
+    job_info table that NO LONGER HAD those rows -- the join silently
+    lost its basis, mon_jdls's candidate set came back empty, and 528
+    equally-old mon_jdls rows were never even considered (not deleted,
+    not counted as kept/unverified -- simply invisible to the run).
+    Collecting every table's candidates BEFORE any table's deletes run
+    closes this regardless of TABLES' order or which table's predicate
+    happens to reference which.
+    """
+    old_job_ids_by_table = {
+        table.landing_table: select_old_job_ids(conn, table, cutoffs) for table in TABLES
+    }
+    results: dict[str, TableResult] = {}
+    for table in TABLES:
+        results[table.landing_table] = classify_and_delete(
+            conn, presence_catalog, table, old_job_ids_by_table[table.landing_table]
+        )
+    return results
 
 
 def format_summary(total: TableResult) -> str:
@@ -280,8 +318,13 @@ def run(env: Mapping[str, str] | None = None) -> int:
     total = TableResult(kept=0, deleted=0, unverified=0)
     conn = psycopg2.connect(pg_url)
     try:
+        # Two-phase across ALL tables (run_retention_pass's docstring):
+        # never delete-then-select table-by-table here -- mon_jdls's
+        # job_info-join predicate depends on job_info's old rows still
+        # being present when mon_jdls's own SELECT runs.
+        results_by_table = run_retention_pass(conn, presence_catalog, cutoffs)
         for table in TABLES:
-            result = retain_table(conn, presence_catalog, table, cutoffs)
+            result = results_by_table[table.landing_table]
             print(
                 f"RETENTION table={table.landing_table} kept={result.kept} "
                 f"deleted={result.deleted} unverified={result.unverified}"

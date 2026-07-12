@@ -43,6 +43,7 @@ from alice_ingest.retention import (
     exit_code,
     format_summary,
     retain_table,
+    run_retention_pass,
     select_old_job_ids,
 )
 
@@ -276,6 +277,112 @@ class TestRetainTableComposesSelectAndClassify:
         result = retain_table(conn, catalog, JOB_INFO_TABLE, cutoffs)
 
         assert result == TableResult(kept=1, deleted=1, unverified=1)
+
+
+class _FakeMultiTableCursor:
+    """Routes SELECT results by matching the landing-table name embedded
+    in the SQL text (each age_sql references its own FROM table by name);
+    behaves like FakeCursor for DELETEs. Distinguishes mon_jdls's join SQL
+    (which also contains the substring "job_info") by checking the more
+    specific table names first."""
+
+    _TABLE_NAME_PRIORITY = ("mon_jdls", "trace", "job_info")
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.rowcount = 0
+        self._rows: list[tuple] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql, params):
+        self._conn.executed.append((sql, params))
+        if sql.strip().upper().startswith("SELECT"):
+            for table_name in self._TABLE_NAME_PRIORITY:
+                if table_name in sql:
+                    self._rows = self._conn.rows_by_table.get(table_name, [])
+                    return
+            self._rows = []
+        else:
+            self.rowcount = len(params[0])
+
+    def fetchall(self):
+        return self._rows
+
+
+class FakeMultiTableConnection:
+    """Fake connection spanning all three landing tables, used ONLY to
+    assert cross-table operation ORDERING in run_retention_pass -- a
+    single-table fake can't exercise this (see the regression test
+    below)."""
+
+    def __init__(self, rows_by_table: dict[str, list[tuple]]):
+        self.rows_by_table = rows_by_table
+        self.executed: list[tuple] = []
+        self.commits = 0
+
+    def cursor(self):
+        return _FakeMultiTableCursor(self)
+
+    def commit(self):
+        self.commits += 1
+
+
+class TestRunRetentionPassTwoPhaseOrdering:
+    """Regression for the bug found on Task 4's first live nightly
+    CronWorkflow trigger: mon_jdls's age predicate JOINs to job_info.
+    last_update (mon_jdls has no timestamp of its own). Deleting job_info's
+    old rows before mon_jdls's SELECT ran made the join lose its basis --
+    mon_jdls's candidate set silently came back empty, and its equally-old
+    rows were never deleted (nor counted as kept/unverified). Two-phase
+    execution (collect every table's candidates, THEN delete) fixes this
+    regardless of table processing order."""
+
+    def test_all_tables_selected_before_any_table_is_deleted(self):
+        rows_by_table = {
+            "job_info": [(1,), (2,)],
+            "trace": [(1,), (2,)],
+            "mon_jdls": [(1,), (2,)],
+        }
+        conn = FakeMultiTableConnection(rows_by_table)
+        catalog = FakePresenceCatalog(present={1, 2})
+        cutoffs = {"naive": datetime(2026, 1, 1), "aware": datetime(2026, 1, 1)}
+
+        results = run_retention_pass(conn, catalog, cutoffs)
+
+        assert results["job_info"] == TableResult(kept=0, deleted=2, unverified=0)
+        assert results["trace"] == TableResult(kept=0, deleted=2, unverified=0)
+        assert results["mon_jdls"] == TableResult(kept=0, deleted=2, unverified=0)
+
+        # The first 3 executed statements are all SELECTs (one per table);
+        # no DELETE appears before every table's SELECT has run.
+        is_select = [sql.strip().upper().startswith("SELECT") for sql, _ in conn.executed]
+        assert is_select[:3] == [True, True, True]
+        assert False in is_select[3:]  # the DELETEs do eventually happen
+
+    def test_mon_jdls_join_still_finds_rows_after_job_info_rows_are_gone(self):
+        # The specific failure mode: mon_jdls's SELECT must be evaluated
+        # against job_info as it stood BEFORE this pass's deletes, not
+        # after -- simulated here by mon_jdls's fake rows being populated
+        # independently of job_info's fake rows (a real join would break
+        # if job_info's matching rows were deleted first; two-phase
+        # collection means that never happens within one pass).
+        rows_by_table = {
+            "job_info": [(1,)],
+            "trace": [],
+            "mon_jdls": [(1,)],
+        }
+        conn = FakeMultiTableConnection(rows_by_table)
+        catalog = FakePresenceCatalog(present={1})
+        cutoffs = {"naive": datetime(2026, 1, 1), "aware": datetime(2026, 1, 1)}
+
+        results = run_retention_pass(conn, catalog, cutoffs)
+
+        assert results["mon_jdls"] == TableResult(kept=0, deleted=1, unverified=0)
 
 
 class TestTableResultAndSummary:
