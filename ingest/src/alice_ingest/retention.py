@@ -14,26 +14,54 @@ Per-table cutoff predicate (brief, Plan 2 Task 4 "Context" section):
   - `trace`: has NO `last_update` column in production (research/
     2026-07-12_ml-consumer-data-contract.md, "Production schema ground
     truth"). Uses its own `laststatuschangetimestamp` bigint-epoch column
-    instead. Epoch UNIT verified empirically (Plan 2 Task 4) against both
-    the live kind fixture and the brief's documented production
-    convention ("bigint ms per gen-1 Java"): querying the running kind
-    mon-data fixture showed `laststatuschangetimestamp` sample values
-    (~1.78e9) in the SAME magnitude as `extract(epoch FROM now())`
-    (~1.78e9) -- i.e. the fixture was generating epoch SECONDS, not
-    milliseconds, contradicting the documented production convention. This
-    was a fixture bug, fixed at the source (hack/seed-fixture.sh, one-line
-    `* 1000`) rather than papered over with a magnitude-sniffing heuristic
-    here, so this module's SQL matches real production semantics
-    unconditionally: `to_timestamp(laststatuschangetimestamp / 1000.0)`.
-    `to_timestamp()` returns `timestamptz`, so the cutoff bound for this
-    table must be a tz-aware Python datetime.
+    instead. Epoch UNIT: MILLISECONDS -- resolved by querying PRODUCTION
+    live, not from the brief (the brief documents no unit at all; an
+    earlier version of this docstring and of hack/seed-fixture.sh's
+    comment incorrectly attributed "bigint ms per gen-1 Java convention"
+    to the brief, which a P2T4 review flagged as citation-free and
+    fabricated). Ground truth: research/2026-07-12_ml-consumer-data-
+    contract.md, "Production schema ground truth" section, epoch-unit
+    bullet (controller-resolved live against production 2026-07-12):
+    production sample `laststatuschangetimestamp`/`startedtimestamp`/
+    `finaltimestamp` = e.g. `1783848905000` vs `extract(epoch from now())`
+    = `1783869017` -- three orders of magnitude apart, i.e. production
+    stores these trace epoch columns in MILLISECONDS. `runningtimestamp`/
+    `savingtimestamp` are treated the same way by the same system's
+    convention (all five are populated by the same gen-1 monitoring writer
+    per column naming/shape), though only the three above were directly
+    sampled live. Separately, the live kind FIXTURE was found generating
+    epoch SECONDS at the same ~1.78e9 magnitude as `extract(epoch FROM
+    now())` -- a fixture bug, not a units question about production --
+    fixed at the source across all five trace epoch columns
+    (hack/seed-fixture.sh, `* 1000`) rather than papered over with a
+    magnitude-sniffing heuristic here, so this module's SQL matches real
+    production semantics unconditionally:
+    `to_timestamp(laststatuschangetimestamp / 1000.0)`. `to_timestamp()`
+    returns `timestamptz`, so the cutoff bound for this table must be a
+    tz-aware Python datetime.
+
+    Plausibility guard (review Fix 1c): `check_trace_plausibility()` below
+    sanity-checks the ms->s decoded min/max of the trace candidate set
+    against [2020-01-01, 2035-01-01) BEFORE any delete runs, and aborts
+    loudly (distinct `RETENTION ABORT: implausible trace timestamps`
+    message, non-zero exit) if it's ever wrong again -- the defense
+    against a future unit-convention drift (production reverting to
+    seconds, a fixture/migration regression, etc.) silently mass-deleting
+    rows under a wrong divisor.
 
   - `mon_jdls`: has NO timestamp column of any kind (production ground
     truth: `job_id`, `lpmjobtypeid`, `full_jdl` only). Retention age is
     derived via a join to `job_info.last_update` on `job_id` (documented
     choice per the brief's explicit instruction) -- a `mon_jdls` row's
     "age" is its parent job's `last_update`. Naive cutoff, same as
-    `job_info`.
+    `job_info`. The join is a LEFT JOIN with an `OR j.job_id IS NULL`
+    escape hatch (review Fix 2, important), not an INNER JOIN: an INNER
+    JOIN makes a `mon_jdls` row permanently un-collectible once its parent
+    `job_info` row has already been retained (deleted) by an *earlier*
+    run -- the row would never again match the join and would accumulate
+    forever (flagged as a concern in task-4-report.md). The LEFT JOIN form
+    treats a `mon_jdls` row whose parent is already gone (orphaned) as
+    eligible, same as one whose parent is old.
 
 Iceberg presence verification: job_ids are checked in batches of
 `BATCH_SIZE` (10_000, per the brief) using pyiceberg's `In` row-filter
@@ -88,12 +116,87 @@ _TRACE_AGE_SQL = (
 _TRACE_DELETE_SQL = "DELETE FROM trace WHERE job_id = ANY(%s)"
 
 # mon_jdls has no timestamp of its own -- join to job_info.last_update.
+# LEFT JOIN (not INNER) + "OR j.job_id IS NULL" (review Fix 2, important):
+# a mon_jdls row whose job_info parent was already retained (deleted) by a
+# previous run is an ORPHAN, not "not old enough" -- an INNER JOIN would
+# silently and permanently hide it from every future candidate set. See
+# this module's docstring and TestMonJdlsOrphanEligibility in
+# tests/test_retention.py for the behavioral regression proof.
 _MON_JDLS_AGE_SQL = (
     "SELECT DISTINCT m.job_id FROM mon_jdls m "
-    "JOIN job_info j ON j.job_id = m.job_id "
-    "WHERE j.last_update < %s"
+    "LEFT JOIN job_info j ON j.job_id = m.job_id "
+    "WHERE j.last_update < %s OR j.job_id IS NULL"
 )
 _MON_JDLS_DELETE_SQL = "DELETE FROM mon_jdls WHERE job_id = ANY(%s)"
+
+
+# --------------------------------------------------------------------------
+# Trace-table plausibility guard (review Fix 1c, critical).
+# --------------------------------------------------------------------------
+
+
+class RetentionAbortError(RuntimeError):
+    """Raised by check_trace_plausibility() when the trace table's decoded
+    timestamps look implausible -- caught by run() and turned into a loud,
+    distinctly-messaged (`RETENTION ABORT: implausible trace timestamps`),
+    non-zero-exit abort BEFORE any delete executes. See this module's
+    docstring for the defense this guards against."""
+
+
+# Plausible calendar window for to_timestamp(laststatuschangetimestamp /
+# 1000.0): [PLAUSIBLE_MIN, PLAUSIBLE_MAX). Wide on purpose -- this is a
+# coarse sanity check against gross unit-convention errors (e.g. a value
+# read as ms that's actually seconds decodes to 1970-something, comfortably
+# outside this window), not a tight freshness check.
+PLAUSIBLE_MIN = datetime(2020, 1, 1, tzinfo=timezone.utc)
+PLAUSIBLE_MAX = datetime(2035, 1, 1, tzinfo=timezone.utc)
+
+# Aggregates over exactly the candidate job_ids already collected by the
+# two-phase pass's SELECT phase (run_retention_pass) -- cheap: one bounded
+# query, not a full-table scan ("the candidate set", per the review ask).
+_TRACE_PLAUSIBILITY_SQL = (
+    "SELECT MIN(to_timestamp(laststatuschangetimestamp / 1000.0)), "
+    "MAX(to_timestamp(laststatuschangetimestamp / 1000.0)) "
+    "FROM trace WHERE job_id = ANY(%s)"
+)
+
+
+def check_trace_plausibility(conn, candidate_job_ids: Sequence[int]) -> None:
+    """Plausibility guard (review Fix 1c): before ANY delete runs against
+    `trace`, sanity-check that laststatuschangetimestamp/1000.0 decodes to
+    timestamps inside [PLAUSIBLE_MIN, PLAUSIBLE_MAX). Aborts loudly
+    (RetentionAbortError, distinct `RETENTION ABORT: implausible trace
+    timestamps` message) rather than proceeding to delete under a
+    possibly-wrong unit conversion -- the defense against a future
+    epoch-unit drift (production reverting to seconds, a fixture/migration
+    regression, etc.) silently mass-deleting rows.
+
+    No-ops on an empty candidate set: nothing would be deleted, so there is
+    nothing to guard.
+    """
+    candidate_job_ids = list(candidate_job_ids)
+    if not candidate_job_ids:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute(_TRACE_PLAUSIBILITY_SQL, (candidate_job_ids,))
+        row = cur.fetchone()
+    if not row:
+        return
+    lo, hi = row
+    if lo is None or hi is None:
+        return
+
+    if lo < PLAUSIBLE_MIN or hi >= PLAUSIBLE_MAX:
+        raise RetentionAbortError(
+            f"RETENTION ABORT: implausible trace timestamps "
+            f"(min={lo!r}, max={hi!r}; expected within "
+            f"[{PLAUSIBLE_MIN!r}, {PLAUSIBLE_MAX!r})) -- refusing to delete "
+            f"{len(candidate_job_ids)} candidate row(s) from `trace`. This "
+            f"is almost certainly an epoch-unit regression (seconds "
+            f"mistaken for milliseconds, or vice versa) -- investigate "
+            f"before rerunning retention."
+        )
 
 
 @dataclass(frozen=True)
@@ -276,10 +379,18 @@ def run_retention_pass(
     Collecting every table's candidates BEFORE any table's deletes run
     closes this regardless of TABLES' order or which table's predicate
     happens to reference which.
+
+    Also runs the trace-table plausibility guard (review Fix 1c) right
+    after collection, still BEFORE any table's delete loop starts:
+    check_trace_plausibility() raises RetentionAbortError if trace's
+    candidate set decodes to an implausible calendar range, aborting the
+    whole pass -- no table's delete (not just trace's) executes in that
+    case.
     """
     old_job_ids_by_table = {
         table.landing_table: select_old_job_ids(conn, table, cutoffs) for table in TABLES
     }
+    check_trace_plausibility(conn, old_job_ids_by_table["trace"])
     results: dict[str, TableResult] = {}
     for table in TABLES:
         results[table.landing_table] = classify_and_delete(
@@ -322,7 +433,15 @@ def run(env: Mapping[str, str] | None = None) -> int:
         # never delete-then-select table-by-table here -- mon_jdls's
         # job_info-join predicate depends on job_info's old rows still
         # being present when mon_jdls's own SELECT runs.
-        results_by_table = run_retention_pass(conn, presence_catalog, cutoffs)
+        try:
+            results_by_table = run_retention_pass(conn, presence_catalog, cutoffs)
+        except RetentionAbortError as exc:
+            # Plausibility guard tripped (review Fix 1c) -- no delete has
+            # run for ANY table (run_retention_pass's docstring). Print the
+            # distinct, grep-friendly abort message and exit non-zero
+            # instead of the normal RETENTION summary line.
+            print(str(exc))
+            return 1
         for table in TABLES:
             result = results_by_table[table.landing_table]
             print(

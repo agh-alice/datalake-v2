@@ -25,18 +25,38 @@ cd "$(dirname "$0")/.."
 #     this is trace's incremental cursor per pipeline.py's build_trace_source;
 #     values spread over the same 30-day window as the other timestamps so
 #     the incremental extraction actually has variance to exercise across
-#     reruns/retention, not a single constant. UNIT FIX (Plan 2 Task 4):
-#     laststatuschangetimestamp is stored as epoch MILLISECONDS in
-#     production (gen-1 Java convention, per the Task 4 brief) -- this
-#     fixture previously emitted `extract(epoch FROM ts)::bigint`, epoch
-#     SECONDS, verified empirically against the live kind fixture (sample
-#     value ~1.78e9, same magnitude as `extract(epoch FROM now())`, not
-#     ~1.78e12 as a true ms value would be). retention.py's trace-table
-#     cutoff predicate must match real production semantics
-#     (`to_timestamp(laststatuschangetimestamp / 1000.0)`), so the
-#     mismatch is fixed at the source here (x1000) rather than papered
-#     over with a magnitude-sniffing heuristic in retention code that
-#     would never see real production data.).
+#     reruns/retention, not a single constant.
+#
+#     UNIT FIX (Plan 2 Task 4, provenance corrected by a later review): all
+#     FIVE trace epoch columns (laststatuschangetimestamp, startedtimestamp,
+#     finaltimestamp, runningtimestamp, savingtimestamp) are stored as epoch
+#     MILLISECONDS in production. This is resolved from a LIVE PRODUCTION
+#     sample, NOT from the brief (the brief documents no unit at all -- an
+#     earlier version of this comment incorrectly attributed "bigint ms per
+#     gen-1 Java convention" to the brief, which a P2T4 review flagged as
+#     citation-free and fabricated). Ground truth: research/2026-07-12_ml-
+#     consumer-data-contract.md, "Production schema ground truth" section,
+#     epoch-unit bullet (controller-resolved live against production
+#     2026-07-12): production sample laststatuschangetimestamp/
+#     startedtimestamp/finaltimestamp = e.g. 1783848905000 vs
+#     extract(epoch from now()) = 1783869017 -- three orders of magnitude
+#     apart, i.e. milliseconds. runningtimestamp/savingtimestamp follow the
+#     same system's convention (all five populated by the same gen-1
+#     monitoring writer), though only the three above were directly
+#     sampled live.
+#
+#     This fixture previously emitted `extract(epoch FROM ts)::bigint`
+#     (epoch SECONDS) for ALL FIVE columns except laststatuschangetimestamp,
+#     which alone had already been x1000'd in an earlier fix -- verified
+#     empirically against the live kind fixture (sample value ~1.78e9, same
+#     magnitude as `extract(epoch FROM now())`, not ~1.78e12 as a true ms
+#     value would be). retention.py's trace-table cutoff predicate matches
+#     real production semantics for laststatuschangetimestamp
+#     (`to_timestamp(laststatuschangetimestamp / 1000.0)`); the remaining
+#     four columns are not read by retention.py today but are aligned to
+#     the same ms convention here (x1000) for one consistent story across
+#     the fixture, matching production, rather than a per-column special
+#     case.
 #   mon_jdls (3 cols, not 2 -- review fix, ground truth doc corrected the
 #     brief's original 2-col assumption): job_id bigint, lpmjobtypeid
 #     varchar, full_jdl text -- full_jdl includes JDL text with BOTH
@@ -135,14 +155,14 @@ SELECT
   'wn' || lpad((1 + gs % 200)::text, 4, '0') || '.site.alice',
   200000 + (gs % 500000),
   round((50 + random() * 50)::numeric, 2)::text,
-  extract(epoch FROM ts - ((gs % 3) || ' hours')::interval)::bigint,
+  (extract(epoch FROM ts - ((gs % 3) || ' hours')::interval) * 1000)::bigint,
   90000000 + gs,
   10000 + gs % 50000,
   1 + gs % 8,
   3600 + (gs % 5) * 1800,
-  extract(epoch FROM ts - ((gs % 5) || ' hours')::interval - interval '10 minutes')::bigint,
-  extract(epoch FROM ts - ((gs % 3) || ' hours')::interval - interval '2 minutes')::bigint,
-  extract(epoch FROM ts - ((gs % 5) || ' hours')::interval)::bigint,
+  (extract(epoch FROM ts - ((gs % 5) || ' hours')::interval - interval '10 minutes') * 1000)::bigint,
+  (extract(epoch FROM ts - ((gs % 3) || ' hours')::interval - interval '2 minutes') * 1000)::bigint,
+  (extract(epoch FROM ts - ((gs % 5) || ' hours')::interval) * 1000)::bigint,
   (100 + (random() * 36000))::integer,
   400000 + (gs % 800000),
   'ALICE::SITE_' || lpad((1 + gs % 25)::text, 2, '0'),
