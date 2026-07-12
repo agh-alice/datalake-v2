@@ -317,3 +317,11 @@ environment including production.** Moving to v3.5.0 GA once a chart bundles
 it (or once `global.image.tag` is bumped to it directly) is a routine version
 upgrade like any other, not a gate that blocks cyfronet activation. Track it
 opportunistically; do not delay bootstrap waiting for it.
+
+## Trino on cyfronet — Plan 4 notes
+
+- **Chart and CPU re-evaluation:** The kind cluster pins chart 1.40.0 / Trino 476 because the kind host's virtualized CPU lacks x86-64-v3 support (AVX2/BMI2 flags); Trino ≥477 inherits RHEL 10's x86-64-v3 baseline and refuses to boot. Before re-pinning to the newest chart on cyfronet, check that all worker nodes support AVX2 and BMI2: `grep -m1 -oE 'avx2|bmi2' /proc/cpuinfo` on a node. Once verified, bump to the newest available chart and appVersion in apps/infra/trino.yaml.
+
+- **Property-name version-lock:** Trino 476 uses `fs.native-s3.enabled` for S3 connectivity, not `fs.s3.enabled`. The latter became the property name in later releases (≥477). When re-pinning the chart/appVersion, re-verify the exact property name against the Trino version's own docs (`https://trino.io/docs/<version>/object-storage/file-system-s3.html`), not the `/current/` doc version — Trino docs are version-specific and property names have changed. See apps/infra/trino.yaml comments for the root-cause.
+
+- **Landing-RO credentials on cyfronet:** The `landing-ro` Secret is currently harness-provisioned on kind by `hack/kind-up.sh`. On cyfronet, it is sourced via `ExternalSecret` from GCP Secret Manager (analogous to section §5's `lakekeeper-pg-encryption` pattern). Store the read-only Trino user's password in Secret Manager at project `tensile-ethos-474915-f7` under key `trino-landing-ro-password`, then apply an `ExternalSecret` to pull it into namespace `trino` as Secret name `landing-ro` (same Secret name, different provisioning). The chart's existing `envFrom.secretRef.name: landing-ro` requires no change — only how the Secret is created differs between environments.

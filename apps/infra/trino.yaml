@@ -155,6 +155,9 @@ spec:
             connection-url=jdbc:postgresql://mon-data-rw.landing-db.svc:5432/mon_data
             connection-user=${ENV:LANDING_RO_USER}
             connection-password=${ENV:LANDING_RO_PASSWORD}
+          # Remove demo catalogs from chart defaults (tpch, tpcds).
+          tpch: null
+          tpcds: null
   destination: {server: https://kubernetes.default.svc, namespace: trino}
   syncPolicy:
     automated: {prune: true, selfHeal: true}
