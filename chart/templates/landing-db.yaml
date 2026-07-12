@@ -13,7 +13,8 @@ spec:
   postgresql:
     parameters:
       max_connections: {{ .Values.landingDb.maxConnections | quote }}
-      autovacuum_freeze_max_age: "200000000"
+      # E4 (XID wraparound) protection is monitoring, not tuning: the LandingDBXidAgeHigh
+      # alert (Task 6 / design D11) + CNPG's exported cnpg_pg_database_xid_age metric.
   bootstrap:
     initdb:
       database: mon_data
