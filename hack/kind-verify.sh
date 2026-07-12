@@ -155,6 +155,97 @@ if kubectl -n argo-workflows get "$WF_NAME" -o jsonpath='{.status.phase}' | grep
 else
   echo "FAIL: manual verification workflow did not succeed"; exit 1
 fi
+# Hard gate (Plan 2 Task 3): Iceberg contents probe. Everything above proves
+# infrastructure is up; this proves data actually flowed fixture-PostgreSQL
+# -> dlt -> Lakekeeper/Iceberg/MinIO end to end. Depends on hack/seed-
+# fixture.sh + hack/run-ingest-once.sh having been run first (Task 3's
+# acceptance sequence: seed -> run-ingest-once (x2) -> kind-verify) -- this
+# gate does not run them itself, it only asserts their result persisted.
+#
+# Runs the ingest image's own `python -c` (brief Step 4) as a throwaway pod,
+# envFrom Secret ingest-env so it authenticates to Lakekeeper/MinIO exactly
+# like the real ingestion Workflow (same flat-key iceberg_catalog_config
+# dict trap applies here -- see ingest/src/alice_ingest/pipeline.py's
+# configure_dlt() docstring and research/2026-07-12_dlt-iceberg-lakekeeper-
+# api-verification.md).
+#
+# Two things verified empirically against this cluster in Task 3, not from
+# memory/docs:
+#   1. `catalog.load_table(...).scan().count()` IS a valid direct call on
+#      the pinned pyiceberg (0.11.1, resolved via dlt[pyiceberg]==1.28.2) --
+#      no to_arrow().num_rows fallback needed.
+#   2. dlt's naming convention does NOT collapse both LPM casings into one
+#      column. The mixed-case fixture value `LPMPassName` has a detectable
+#      camelCase boundary and normalizes to `jdl__lpm_pass_name`; the
+#      all-caps `LPMPASSNAME` has no boundary to split and normalizes to
+#      `jdl__lpmpassname`. Both are real, distinct columns in
+#      alice.mon_jdls_parsed (verified: 499 non-null rows each against the
+#      1000-row fixture's 50/50 split, minus the 2 deliberately-corrupt
+#      JDLs) -- assert both so a regression in either normalization path is
+#      caught, not just the substring-matching one.
+INGEST_IMAGE=$(yq -r '.images.ingest' chart/values.yaml)
+kubectl -n argo-workflows delete pod iceberg-contents-probe --ignore-not-found >/dev/null 2>&1
+cat <<PODYAML | kubectl -n argo-workflows apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: iceberg-contents-probe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: $INGEST_IMAGE
+      envFrom:
+        - secretRef: {name: ingest-env}
+      command:
+        - python
+        - -c
+        - |
+          import os, sys
+          from pyiceberg.catalog import load_catalog
+          warehouse = os.environ["LAKEKEEPER_WAREHOUSE"]
+          catalog = load_catalog(
+              warehouse,
+              **{
+                  "uri": os.environ["LAKEKEEPER_URI"].rstrip("/") + "/catalog",
+                  "type": "rest",
+                  "warehouse": warehouse,
+                  "header.X-Iceberg-Access-Delegation": "vended-credentials",
+                  "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
+                  "s3.endpoint": os.environ["S3_ENDPOINT"],
+                  "s3.access-key-id": os.environ["S3_ACCESS_KEY"],
+                  "s3.secret-access-key": os.environ["S3_SECRET_KEY"],
+                  "s3.region": os.environ.get("S3_REGION", "local-01"),
+              },
+          )
+          n = catalog.load_table("alice.job_info").scan().count()
+          print(f"job_info count={n}")
+          if n < 900:
+              print(f"FAIL: job_info count {n} < 900")
+              sys.exit(1)
+          cols = [f.name for f in catalog.load_table("alice.mon_jdls_parsed").schema().fields]
+          print("mon_jdls_parsed columns:", cols)
+          needed = {"jdl__lpmpassname", "jdl__lpm_pass_name"}
+          missing = needed - set(cols)
+          if missing:
+              print(f"FAIL: missing flattened JDL columns: {missing}")
+              sys.exit(1)
+          print("iceberg-contents-probe: OK")
+PODYAML
+phase=""
+for i in $(seq 1 30); do
+  phase=$(kubectl -n argo-workflows get pod iceberg-contents-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 5
+done
+PROBE_LOG=$(kubectl -n argo-workflows logs iceberg-contents-probe 2>/dev/null || echo "")
+kubectl -n argo-workflows delete pod iceberg-contents-probe --ignore-not-found >/dev/null 2>&1
+echo "$PROBE_LOG"
+if [ "$phase" = "Succeeded" ] && echo "$PROBE_LOG" | grep -q "iceberg-contents-probe: OK"; then
+  echo "iceberg contents OK (job_info >=900 rows, mon_jdls_parsed flattened JDL columns present)"
+else
+  echo "FAIL: iceberg-contents-probe phase=$phase"; exit 1
+fi
 # Banner moved here (final review R1): this must be the LAST line of the
 # script. It used to print before the workflow probe above, so a log reader
 # scanning for this line would see "success" on a run that later failed.
