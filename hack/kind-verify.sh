@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper external-secrets monitoring)   # extended by later tasks
+EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper external-secrets monitoring argo-workflows)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -73,3 +73,25 @@ else
   echo "FAIL: datalake alert rules not loaded in Prometheus"; exit 1
 fi
 echo "kind-verify: all applications Synced/Healthy"
+# Manual Workflow run using the same image the CronWorkflow uses (Task 7) --
+# the CronWorkflow itself ticks every 5m; this proves the pipeline-runner SA
+# + RBAC + digest-pinned image actually execute a workflow, without waiting
+# for a scheduled tick.
+kubectl -n argo-workflows create -f - <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata: {generateName: hello-manual-}
+spec:
+  serviceAccountName: pipeline-runner
+  entrypoint: main
+  templates:
+    - name: main
+      container: {image: $(kubectl -n argo-workflows get cronworkflow hello -o jsonpath='{.spec.workflowSpec.templates[0].container.image}'), command: [sh, -c, "echo verify"]}
+EOF
+sleep 30
+# Hard gate (probe pattern per Task 2/3 reviews)
+if kubectl -n argo-workflows get workflows --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].status.phase}' | grep -q Succeeded; then
+  echo "workflow execution OK"
+else
+  echo "FAIL: manual verification workflow did not succeed"; exit 1
+fi

@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-workflows
+  namespace: argocd
+  annotations: {argocd.argoproj.io/sync-wave: "1"}
+spec:
+  project: datalake
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-workflows
+    # 0.45.21 baseline superseded -- 1.0.19 (appVersion v4.0.7) is newest
+    # stable per `helm search repo argo/argo-workflows --versions` (Task 7).
+    # Prometheus CRDs already exist on this cluster (kube-prometheus-stack,
+    # Task 6), so controller.serviceMonitor.enabled: true is safe here; the
+    # clean-room first-install ordering caveat is documented in Task 8.
+    targetRevision: "1.0.19"
+    helm:
+      valuesObject:
+        controller:
+          metricsConfig: {enabled: true}
+          serviceMonitor: {enabled: true}
+        workflow:
+          serviceAccount: {create: false}
+        server:
+          enabled: true
+          authModes: [server]
+  destination: {server: https://kubernetes.default.svc, namespace: argo-workflows}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true]

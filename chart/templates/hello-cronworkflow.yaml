@@ -1,0 +1,16 @@
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: hello
+  namespace: argo-workflows
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: pipeline-runner
+    entrypoint: main
+    templates:
+      - name: main
+        container:
+          image: {{ .Values.images.busybox }}
+          command: [sh, -c, "echo hello from datalake-v2 && date"]
