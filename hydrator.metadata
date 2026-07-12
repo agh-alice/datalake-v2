@@ -1,7 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "fa23e24ff0852767c5a4b4ceedae53f9f8d9518a",
+  "drySha": "2c232026c440bc279654bcae1858a985beff3d1e",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T09:34:57Z",
-  "subject": "fix: CronWorkflow schedules list per current CRD schema (SSA rejects legacy field)"
+  "date": "2026-07-12T09:57:40Z",
+  "subject": "docs: runbooks (wraparound, cyfronet bootstrap, component recipe) + cyfronet hydrator app",
+  "body": "- docs/runbooks/xid-wraparound.md: diagnosis/recovery/prevention for the E4\n  transaction-ID wraparound incident class the LandingDBXidAgeHigh alert\n  guards against.\n- docs/runbooks/bootstrap-cyfronet.md: mirrors hack/kind-up.sh for the real\n  cluster -- write-capable SSH deploy key (SOPS-encrypted), ESO\n  ClusterSecretStore against GCP Secret Manager, Lakekeeper encryption key\n  via ExternalSecret, and the environments/cyfronet-next -> cyfronet PR gate.\n- docs/runbooks/adding-a-component.md: the two extension recipes (authored\n  chart resource vs. upstream operator Application) and the common\n  EXPECTED_APPS/lint/kind-verify tail both end with.\n- environments/cyfronet/apps/datalake.yaml: the datalake-cyfronet Source\n  Hydrator Application (values.yaml + values-cyfronet.yaml, syncSource\n  environments/cyfronet, hydrateTo environments/cyfronet-next).\n- environments/cyfronet/argocd-values.yaml: cyfronet ArgoCD bootstrap values\n  (kind's minus server.insecure, plus resource requests).\n- Makefile: sops-setup target (age keypair -> .sops.yaml recipient), needed\n  for the bootstrap-cyfronet runbook's SOPS flow to actually be runnable.\n"
 }
