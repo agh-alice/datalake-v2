@@ -85,6 +85,13 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     in-memory config provider dlt consults at these dotted paths does not
     distinguish config/secrets at lookup time; the split matters for
     toml-file hygiene only, which is moot since no toml ships in this image).
+
+    `iceberg_catalog_config` is assigned as one dict literal rather than
+    per-key dotted paths because dlt's dotted-path accessor nests each
+    assignment into `{"s3": {"endpoint": ...}}`, whereas pyiceberg reads
+    catalog properties as flat dotted-string keys such as "s3.endpoint"
+    (correction recorded in
+    research/2026-07-12_dlt-iceberg-lakekeeper-api-verification.md).
     """
     bucket = _require_env(env, "S3_BUCKET")
     s3_endpoint = _require_env(env, "S3_ENDPOINT")
@@ -107,20 +114,25 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     dlt.secrets["iceberg_catalog.iceberg_catalog_name"] = warehouse
     dlt.secrets["iceberg_catalog.iceberg_catalog_type"] = "rest"
 
-    # [iceberg_catalog.iceberg_catalog_config]
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.uri"] = catalog_uri
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.type"] = "rest"
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.warehouse"] = warehouse
-    dlt.secrets[
-        "iceberg_catalog.iceberg_catalog_config.header.X-Iceberg-Access-Delegation"
-    ] = "vended-credentials"
-    dlt.secrets[
-        "iceberg_catalog.iceberg_catalog_config.py-io-impl"
-    ] = "pyiceberg.io.fsspec.FsspecFileIO"
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.s3.endpoint"] = s3_endpoint
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.s3.access-key-id"] = s3_access_key
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.s3.secret-access-key"] = s3_secret_key
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config.s3.region"] = s3_region
+    # [iceberg_catalog.iceberg_catalog_config] -- set as ONE dict literal.
+    # Per-key dotted assignment (dlt.secrets["...config.s3.endpoint"] = ...)
+    # nests: dlt's accessor turns each dotted path into nested dict levels,
+    # so "s3.endpoint" would land as {"s3": {"endpoint": ...}}. pyiceberg's
+    # REST catalog reads its properties as a flat dict of dotted STRING
+    # keys (see get_header_properties() etc.), so the nested form is
+    # silently ignored at runtime. The dict's own keys are stored verbatim,
+    # which is what pyiceberg needs.
+    dlt.secrets["iceberg_catalog.iceberg_catalog_config"] = {
+        "uri": catalog_uri,
+        "type": "rest",
+        "warehouse": warehouse,
+        "header.X-Iceberg-Access-Delegation": "vended-credentials",
+        "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
+        "s3.endpoint": s3_endpoint,
+        "s3.access-key-id": s3_access_key,
+        "s3.secret-access-key": s3_secret_key,
+        "s3.region": s3_region,
+    }
 
     # Gotcha carried from the research doc: keep purge-on-drop disabled --
     # Lakekeeper hard-deletes can purge recreated tables' files.
@@ -135,7 +147,12 @@ def build_job_info_trace_source(pg_url: str):
     for resource_name in ("job_info", "trace"):
         getattr(source, resource_name).apply_hints(
             incremental=dlt.sources.incremental(
-                "last_update", initial_value=pendulum.DateTime(2026, 1, 1)
+                # pendulum.datetime(...) (tz-aware UTC factory), not the
+                # naive pendulum.DateTime(...) constructor: a naive literal
+                # gets session-TimeZone-cast when pushed down against a
+                # timestamptz column in SQL, which silently shifts the
+                # incremental cursor.
+                "last_update", initial_value=pendulum.datetime(2026, 1, 1)
             ),
             primary_key="job_id",
             write_disposition={"disposition": "merge", "strategy": "upsert"},
