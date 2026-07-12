@@ -15,17 +15,20 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29196603972
-# (commit 5155ccf, ingest-image workflow, rebuild for Plan 2 Task 4:
-# retention.py + sitesonar.py + the ingest-cronworkflows.yaml chart
-# template); verified resolvable via the GHCR registry API (`GET /v2/agh-
-# alice/datalake-v2-ingest/manifests/<digest>` with an anonymous pull
-# token) -- an index manifest wrapping the linux/amd64 image + its
-# attestation manifest, matching the previous pin's structure. Now consumed
-# by chart/templates/ingest-cronworkflows.yaml (Task 4).
+# reviewable in the rendered-branch diff. Pinned from CI run 29196867242
+# (commit 1a73df7, ingest-image workflow, rebuild for the two-phase
+# retention-pass fix -- the prior pin (sha256:26d95243...) had a real bug,
+# caught by Task 4's own live nightly CronWorkflow trigger: mon_jdls's
+# job_info-join age predicate silently found nothing once job_info's own
+# old rows were already deleted earlier in the same pass); verified
+# resolvable via the GHCR registry API (`GET /v2/agh-alice/datalake-v2-
+# ingest/manifests/<digest>` with an anonymous pull token) -- an index
+# manifest wrapping the linux/amd64 image + its attestation manifest,
+# matching the previous pin's structure. Consumed by
+# chart/templates/ingest-cronworkflows.yaml (Task 4).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:26d95243d4d79246215ea71bfd37e25a2b905b53e0817f9b9d30fcff30927ed8"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:f4747a640259cc561c7a2c8c15b1644641b695626f54eb816453bdba8107b6aa"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that

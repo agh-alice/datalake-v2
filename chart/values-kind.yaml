@@ -10,8 +10,18 @@ landingDb:
 # session instead of waiting until 02:00/03:00. The Task 4 acceptance run
 # still triggers a one-off Workflow manually (hack/run-ingest-once.sh's
 # create-from-workflowSpec pattern) rather than waiting on either schedule.
+#
+# Widened from an earlier */15 and */20 (review finding, Task 4's own
+# acceptance run): a schedule that tight auto-fires DURING the manual
+# before/after retention verification window and races the controlled
+# fixture state the verification depends on -- concurrencyPolicy: Forbid
+# only prevents overlapping CronWorkflow-scheduled runs against each
+# other, not against a manually `kubectl create`d Workflow object sharing
+# the same PG connection target. Every 6h is still far tighter than
+# production's once-daily default while leaving a comfortable window for
+# a manual run to complete without an auto tick landing mid-run.
 ingest:
   schedules:
-    nightly: "*/15 * * * *"
-    sitesonar: "*/20 * * * *"
+    nightly: "0 */6 * * *"
+    sitesonar: "30 */6 * * *"
 
