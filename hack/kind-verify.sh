@@ -11,5 +11,11 @@ for app in "${EXPECTED_APPS[@]}"; do
   done
 done
 git fetch origin 'refs/heads/environments/*:refs/remotes/origin/environments/*' 2>/dev/null || true
-git ls-remote --heads origin | grep -q "environments/kind" && echo "hydrated branch environments/kind exists"
+# Hard gate (Task 2 review finding): a bare `A && B` under set -e falls through
+# on non-match, and the final success echo would still run.
+if git ls-remote --heads origin | grep -q "environments/kind"; then
+  echo "hydrated branch environments/kind exists"
+else
+  echo "FAIL: hydrated branch environments/kind missing on origin"; exit 1
+fi
 echo "kind-verify: all applications Synced/Healthy"
