@@ -1,0 +1,89 @@
+[
+  {
+    "name": "valid_lowercase_lpm",
+    "record": {
+      "job_id": 1001,
+      "full_jdl": "{\"TTL\": \"3600\", \"CPUCores\": \"4\", \"Executable\": \"/alice/bin/aliroot\", \"JobTag\": \"prod_2026\", \"User\": \"alidaq\", \"PWG\": \"PWGPP\", \"Packages\": [\"AliPhysics::vAN-20260101\"], \"LPMPassName\": \"pass1\", \"CollisionSystem\": \"pp\"}"
+    },
+    "expect": {
+      "jdl_parse_ok": true,
+      "has_jdl": true,
+      "has_full_jdl_raw": false,
+      "jdl_lpm_key": "LPMPassName",
+      "jdl_lpm_value": "pass1"
+    }
+  },
+  {
+    "name": "valid_uppercase_lpm",
+    "record": {
+      "job_id": 1002,
+      "full_jdl": "{\"TTL\": \"7200\", \"CPUCores\": \"8\", \"Executable\": \"/alice/bin/aliroot\", \"JobTag\": \"prod_2026\", \"User\": \"alidaq\", \"PWG\": \"PWGPP\", \"Packages\": [\"AliPhysics::vAN-20260215\"], \"LPMPASSNAME\": \"pass2\", \"CollisionSystem\": \"PbPb\"}"
+    },
+    "expect": {
+      "jdl_parse_ok": true,
+      "has_jdl": true,
+      "has_full_jdl_raw": false,
+      "jdl_lpm_key": "LPMPASSNAME",
+      "jdl_lpm_value": "pass2"
+    }
+  },
+  {
+    "name": "garbage_double_escaped",
+    "record": {
+      "job_id": 1003,
+      "full_jdl": "{\\\"TTL\\\": \\\"3600\\\", not even close to valid json"
+    },
+    "expect": {
+      "jdl_parse_ok": false,
+      "has_jdl": false,
+      "has_full_jdl_raw": true
+    }
+  },
+  {
+    "name": "null_jdl",
+    "record": {
+      "job_id": 1004,
+      "full_jdl": null
+    },
+    "expect": {
+      "jdl_parse_ok": false,
+      "has_jdl": false,
+      "has_full_jdl_raw": false
+    }
+  },
+  {
+    "name": "missing_jdl_key",
+    "record": {
+      "job_id": 1005
+    },
+    "expect": {
+      "jdl_parse_ok": false,
+      "has_jdl": false,
+      "has_full_jdl_raw": false
+    }
+  },
+  {
+    "name": "json_array_root",
+    "record": {
+      "job_id": 1006,
+      "full_jdl": "[\"TTL\", \"3600\", \"CPUCores\", \"4\"]"
+    },
+    "expect": {
+      "jdl_parse_ok": false,
+      "has_jdl": false,
+      "has_full_jdl_raw": true
+    }
+  },
+  {
+    "name": "json_scalar_root",
+    "record": {
+      "job_id": 1007,
+      "full_jdl": "42"
+    },
+    "expect": {
+      "jdl_parse_ok": false,
+      "has_jdl": false,
+      "has_full_jdl_raw": true
+    }
+  }
+]

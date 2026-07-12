@@ -1,0 +1,26 @@
+[project]
+name = "alice-ingest"
+version = "0.1.0"
+description = "ALICE datalake v2 ingestion pipeline: landing PostgreSQL -> Apache Iceberg (Lakekeeper REST) via dlt"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "dlt[pyiceberg,sql_database,s3,parquet]==1.28.2",
+  "sqlalchemy>=2.0.18",
+  "psycopg2-binary",
+  "connectorx",
+  "pendulum",
+  "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+alice-ingest = "alice_ingest.pipeline:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

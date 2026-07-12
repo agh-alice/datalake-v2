@@ -3,3 +3,10 @@
 kubeconfig*
 age.key
 .DS_Store
+
+# Python build/test artifacts (ingest/ package)
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
