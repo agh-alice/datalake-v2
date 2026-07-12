@@ -106,7 +106,8 @@ metadata:
   namespace: argo-workflows
 spec:
   concurrencyPolicy: Forbid
-  schedule: '*/5 * * * *'
+  schedules:
+    - '*/5 * * * *'
   workflowSpec:
     entrypoint: main
     serviceAccountName: pipeline-runner
