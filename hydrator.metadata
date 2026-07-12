@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "a3bda9f625f936cd181c982458f06fe789498444",
+  "drySha": "a697e5c4f1e33a8f270ae7d3a0280f93c9bb59e5",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T17:00:17Z",
-  "subject": "chore: pin ingest image digest for backfill env overrides",
-  "body": "CI run 29201104110, commit 5afa19d. Verified resolvable via the GHCR\nregistry API before pinning.\n"
+  "date": "2026-07-12T19:20:36Z",
+  "subject": "fix: final-review wave - retention TOCTOU+orphan bound, packages as column, sitesonar bounds (N1-N5)",
+  "body": "Plan 2 FINAL-review, one wave, all five findings:\n\n- N1 (important): retention.py's DELETEs re-assert the age predicate\n  (job_info/trace directly, mon_jdls via the job_info join respecting\n  N2's bound) instead of relying on `job_id = ANY(%s)` alone -- closes\n  the TOCTOU window where a row that revives (its age column advances\n  past cutoff) between the candidate SELECT and the DELETE was removed\n  anyway, discarding whatever the revival wrote.\n- N2 (important): mon_jdls's orphan-eligibility escape hatch is now\n  bounded to `job_id < MIN(job_info.job_id)` -- an unbounded\n  `OR job_id IS NULL` made a brand-new mon_jdls row (parent not yet\n  visible) an instant retention candidate, not just a genuinely\n  retired one.\n- N3 (controller decision): `build_mon_jdls_resource` sets\n  `resource.max_table_nesting = 1` (a settable property, not an\n  apply_hints() kwarg -- verified against the pinned dlt 1.28.2) so JDL\n  list fields (Packages) land as a value column instead of spinning off\n  a `mon_jdls_parsed__jdl__packages` child table; kind-verify.sh's\n  Iceberg probe now asserts the column is present and no child table\n  exists.\n- N4 (minor): corrected the runbooks' \"every table uses merge/upsert\"\n  claim -- site_sonar is append + file-level HWM cursor, with weaker\n  crash-retry semantics than the merge/upsert tables (duplicate appends\n  possible if state persist fails after a committed load).\n- N5 (minor): sitesonar.py logs per-file progress (n/total); adds\n  SITESONAR_LIMIT env (unified with --limit, CLI wins); kind's\n  ingest-env Secret sets SITESONAR_LIMIT=5 (cyfronet left unset); all\n  three ingest CronWorkflows get a values-driven activeDeadlineSeconds\n  ceiling (nightly/sitesonar 21600s, maintenance 3600s) so a stuck pod\n  can no longer hold concurrencyPolicy: Forbid's slot indefinitely.\n\n131 tests passing (was 102), `make lint` clean.\n"
 }

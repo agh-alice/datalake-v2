@@ -132,6 +132,7 @@ spec:
   schedules:
     - 0 */6 * * *
   workflowSpec:
+    activeDeadlineSeconds: 21600
     entrypoint: main
     serviceAccountName: pipeline-runner
     templates:
@@ -173,6 +174,7 @@ spec:
   schedules:
     - 30 */6 * * *
   workflowSpec:
+    activeDeadlineSeconds: 21600
     entrypoint: main
     serviceAccountName: pipeline-runner
     templates:
@@ -197,6 +199,7 @@ spec:
   schedules:
     - 0 4 * * 0
   workflowSpec:
+    activeDeadlineSeconds: 3600
     entrypoint: main
     serviceAccountName: pipeline-runner
     templates:
