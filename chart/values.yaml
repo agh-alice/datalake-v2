@@ -15,10 +15,10 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29201104110
-# (commit 5afa19d, ingest-image workflow, Plan 2 Task 6: adds the
-# INGEST_INITIAL_* backfill env-var overrides in pipeline.py -- docs/
-# runbooks/backfill.md's mechanism; the prior pin [sha256:1590e551...]
+# reviewable in the rendered-branch diff. Pinned from CI run 29205620324
+# (commit a697e5c, ingest-image workflow, Plan 2 FINAL-review wave N1-N5:
+# retention TOCTOU + orphan bound, mon_jdls max_table_nesting=1, sitesonar
+# progress log + SITESONAR_LIMIT; the prior pin [sha256:1b2a1c25...]
 # predates it); verified resolvable via the GHCR registry API
 # (`GET /v2/agh-alice/datalake-v2-ingest/manifests/<digest>` with an
 # anonymous pull token, HTTP 200) -- same index-manifest structure as the
@@ -26,7 +26,7 @@ namespaces:
 # (Task 4 nightly/sitesonar, Task 5 maintenance).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:1b2a1c25c20d7983c3e8f5085f9ebb7d6003d95a58316dd6815669d06a763961"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:6aa4c263a221fc85c210fd3c5c5e1f548c7c30c0d72e574f6a129feed345259c"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
