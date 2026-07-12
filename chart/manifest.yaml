@@ -28,15 +28,6 @@ kind: Namespace
 metadata:
   name: landing-db
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: lakekeeper-pg-encryption
-  namespace: lakekeeper
-stringData:
-  encryptionKey: kind-only-not-a-secret
-type: Opaque
----
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
