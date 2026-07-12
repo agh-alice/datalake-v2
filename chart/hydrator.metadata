@@ -1,6 +1,6 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "c225a696f459b98f617d77ec2298608e19d91c3b",
+  "drySha": "a3bda9f625f936cd181c982458f06fe789498444",
   "commands": [
     "helm template . --name-template datalake-kind --values ./chart/values.yaml --values ./chart/values-kind.yaml --include-crds"
   ]

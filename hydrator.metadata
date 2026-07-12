@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "c225a696f459b98f617d77ec2298608e19d91c3b",
+  "drySha": "a3bda9f625f936cd181c982458f06fe789498444",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T16:11:40Z",
-  "subject": "fix: use exported_namespace, not namespace, in pipeline alert exprs",
-  "body": "Verified live against Prometheus's own stored series after the rules\nfirst loaded: the argo-workflows-workflow-controller ServiceMonitor sets\nhonorLabels: false (chart default), so Prometheus's own scrape-target\nnamespace wins the plain `namespace` label and the scraped metric's own\nnamespace value (the workflow's namespace, what these alerts need) is\nrelabeled to `exported_namespace`. On this cluster the controller pod\nhappens to run in the same namespace as the workflows it manages, so the\noriginal `namespace=\"argo-workflows\"` filter silently matched by\ncoincidence rather than by correct semantics -- caught by cross-checking\nthe raw /metrics text against Prometheus's /api/v1/query label set for\nthe same series, not assumed.\n"
+  "date": "2026-07-12T17:00:17Z",
+  "subject": "chore: pin ingest image digest for backfill env overrides",
+  "body": "CI run 29201104110, commit 5afa19d. Verified resolvable via the GHCR\nregistry API before pinning.\n"
 }
