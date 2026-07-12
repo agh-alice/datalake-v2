@@ -44,3 +44,24 @@ spec:
     enablePodMonitor: false
   storage:
     size: 5Gi
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: mon-data
+  namespace: landing-db
+spec:
+  bootstrap:
+    initdb:
+      database: mon_data
+      owner: mon_user
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  instances: 1
+  monitoring:
+    enablePodMonitor: false
+  postgresql:
+    parameters:
+      autovacuum_freeze_max_age: "200000000"
+      max_connections: "60"
+  storage:
+    size: 2Gi

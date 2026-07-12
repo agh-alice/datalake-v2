@@ -1,7 +1,7 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "fd6a1b068ff9ccae83b6137f7609dc283c0739ac",
+  "drySha": "b671a3b512388298b331fbda1b00cf568bb8c5b0",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T02:42:37Z",
-  "subject": "fix: never render Secrets from the chart - lakekeeper encryption key is harness/ESO-provisioned (review finding)"
+  "date": "2026-07-12T03:08:10Z",
+  "subject": "feat: external-secrets operator and mon-data landing database"
 }
