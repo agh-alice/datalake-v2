@@ -187,7 +187,91 @@ project `tensile-ethos-474915-f7`, pulled in via an `ExternalSecret` against
 the `gcp-secret-manager` `ClusterSecretStore` above, never hardcoded into
 the chart or its values files.
 
-## 6. The PR gate: `environments/cyfronet-next` -> `environments/cyfronet`
+## 6. Lakekeeper warehouse creation against Cyfronet S3
+
+**TO VERIFY with real creds when provided -- everything in this section is
+unverified until then.** `hack/lakekeeper-warehouse.sh` (used as-is on
+kind, invoked automatically by `hack/kind-up.sh`) creates the `default`
+Lakekeeper warehouse with a storage-profile pointed at MinIO -- it
+hardcodes MinIO's in-cluster endpoint (`http://minio.minio.svc:9000`) and
+pulls credentials from the `minio` namespace's `minio-creds` Secret, and
+`chart/values.yaml`'s `namespaces:` list confirms there is no `minio`
+namespace on cyfronet at all (kind-only, per `hack/kind-up.sh`'s own
+comment: "MinIO itself is kind-only -- no cyfronet equivalent"). The script
+cannot be reused unmodified against real Cyfronet S3; there is no
+`hack/lakekeeper-warehouse-cyfronet.sh` yet (deliberately not written here
+-- untestable without real Cyfronet S3 credentials, and writing an
+unverified variant would just move the risk into code instead of a
+runbook's TO VERIFY marker).
+
+Same script, different storage-profile, once credentials exist: run the
+same create/poll/logs/delete throwaway-pod pattern
+`hack/lakekeeper-warehouse.sh` uses, POSTing to `http://lakekeeper.
+lakekeeper.svc:8181/management/v1/warehouse` (the Lakekeeper Service DNS
+itself is identical across environments -- only the storage-profile body
+changes) with:
+
+```json
+{
+  "warehouse-name": "default",
+  "storage-profile": {
+    "type": "s3",
+    "bucket": "<cyfronet-bucket>",
+    "key-prefix": "<cyfronet-key-prefix>",
+    "endpoint": "<cyfronet-s3-endpoint>",
+    "region": "<cyfronet-region>",
+    "path-style-access": true,
+    "flavor": "s3-compat",
+    "sts-enabled": true
+  },
+  "storage-credential": {
+    "type": "s3",
+    "credential-type": "access-key",
+    "access-key-id": "<cyfronet-s3-access-key-id>",
+    "secret-access-key": "<cyfronet-s3-secret-access-key>"
+  },
+  "delete-profile": {"type": "hard"}
+}
+```
+
+Fields that need live verification against real Cyfronet S3 before this
+ships, none of them assumed from kind's MinIO behavior:
+
+- **`flavor`**: `"s3-compat"` is what MinIO needs (verified working, Task
+  1). Lakekeeper 0.12.2's schema also accepts `"aws"` for genuine AWS S3 --
+  Cyfronet's actual S3 implementation and its compatibility class are
+  unknown as of this writing. Try `"s3-compat"` first (most non-AWS S3
+  implementations are Ceph/MinIO-alike); if warehouse creation or the
+  first table create fails in an S3-flavor-specific way, `"aws"` is the
+  fallback to try next.
+- **`sts-enabled`**: `true` + MinIO's root user AssumeRole worked
+  end-to-end on kind with zero extra IAM setup (Task 1). Whether Cyfronet's
+  S3 supports STS AssumeRole at all is unverified -- if it doesn't,
+  warehouse creation or the first vended-credentials request will fail;
+  the fallback is `sts-enabled: false`, which makes Lakekeeper vend the
+  static `storage-credential` pair directly instead of assuming a
+  short-lived role (confirm this fallback path actually works on Cyfronet
+  S3 too -- do not assume it from the Lakekeeper docs alone, same
+  verify-live discipline as every other placeholder in this runbook).
+- **`path-style-access`**: `true` matches MinIO; virtual-hosted-style
+  buckets would need `false`. Depends on how Cyfronet's S3 endpoint is set
+  up -- verify which style it actually serves before setting this.
+- **field names** (`access-key-id`/`secret-access-key`, not
+  `aws-access-key-id`/`aws-secret-access-key`): these are Lakekeeper
+  0.12.2's own schema, not S3-provider-specific, so they should carry over
+  unchanged -- but re-confirm against this cluster's actual Lakekeeper
+  chart pin's `/api-docs/management/v1/openapi.json` if the chart version
+  has moved since (Task 4's lesson: chart version vs. newest upstream docs
+  can and do disagree).
+
+`S3_BUCKET` in the `ingest-env` ExternalSecret (`chart/values-cyfronet.yaml`'s
+comment block) must be `<cyfronet-bucket>/<cyfronet-key-prefix>` -- bucket
+AND key-prefix together, exactly the same "CRITICAL FINDING" as kind's
+`hack/kind-up.sh` documents (dlt computes the Iceberg table location
+entirely client-side from `destination.filesystem.bucket_url`, it never
+asks Lakekeeper for the warehouse's real base path).
+
+## 7. The PR gate: `environments/cyfronet-next` -> `environments/cyfronet`
 
 `environments/cyfronet/apps/datalake.yaml` sets `sourceHydrator.hydrateTo.
 targetBranch: environments/cyfronet-next`, distinct from `syncSource.
@@ -207,7 +291,7 @@ This is deliberately the only environment with this extra hop — kind syncs
 directly from its hydrated branch for fast local iteration; production gets
 a human in the loop on the exact bytes about to apply.
 
-## 7. Verify
+## 8. Verify
 
 Same probes as `hack/kind-verify.sh`, run by hand against the cyfronet
 context (there is no `make cyfronet-verify` yet — extend `hack/kind-verify.sh`

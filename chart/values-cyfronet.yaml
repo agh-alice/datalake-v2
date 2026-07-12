@@ -1,1 +1,55 @@
 # environment: cyfronet — activated in Plan 4; overrides land here
+
+# ingest (Plan 2 Task 6): no Helm-templated Secret or ExternalSecret exists
+# for `argo-workflows/ingest-env` in this chart -- same "no-secrets-in-
+# rendered-branches" convention as lakekeeper-pg-encryption
+# (chart/values.yaml's comment above `lakekeeperDb:`). On kind,
+# hack/kind-up.sh creates `ingest-env` directly from harness-generated/
+# in-cluster values. On cyfronet it must be sourced via an ExternalSecret
+# instead (same pattern docs/runbooks/bootstrap-cyfronet.md §5 already uses
+# for lakekeeper-pg-encryption) -- applied once, out-of-band, NOT by this
+# chart:
+#
+#   apiVersion: external-secrets.io/v1
+#   kind: ExternalSecret
+#   metadata: {name: ingest-env, namespace: argo-workflows}
+#   spec:
+#     refreshInterval: 1h
+#     secretStoreRef: {name: gcp-secret-manager, kind: ClusterSecretStore}
+#     target: {name: ingest-env}
+#     data:
+#       - {secretKey: PG_URL, remoteRef: {key: ingest-pg-url}}
+#       - {secretKey: S3_ENDPOINT, remoteRef: {key: ingest-s3-endpoint}}
+#       - {secretKey: S3_ACCESS_KEY, remoteRef: {key: ingest-s3-access-key}}
+#       - {secretKey: S3_SECRET_KEY, remoteRef: {key: ingest-s3-secret-key}}
+#       - {secretKey: S3_BUCKET, remoteRef: {key: ingest-s3-bucket}}
+#       - {secretKey: S3_REGION, remoteRef: {key: ingest-s3-region}}
+#       - {secretKey: LAKEKEEPER_URI, remoteRef: {key: ingest-lakekeeper-uri}}
+#       - {secretKey: LAKEKEEPER_WAREHOUSE, remoteRef: {key: ingest-lakekeeper-warehouse}}
+#       - {secretKey: RETENTION_DAYS, remoteRef: {key: ingest-retention-days}}
+#
+# Real-S3 placeholder values an operator puts in GCP Secret Manager (project
+# tensile-ethos-474915-f7) under the remote keys above -- illustrative only,
+# this chart never reads S3 credentials, only docs/runbooks/
+# ingestion-pipeline.md's env-var contract table applies at runtime:
+#   PG_URL                postgresql://mon_user:<REDACTED>@mon-data-rw.landing-db:5432/mon_data
+#                          (same in-cluster CNPG DNS name as kind -- unaffected by S3 provider)
+#   S3_ENDPOINT            https://<cyfronet-s3-endpoint>             # TO VERIFY with real creds
+#   S3_ACCESS_KEY          <cyfronet-s3-access-key-id>                # TO VERIFY with real creds
+#   S3_SECRET_KEY           <cyfronet-s3-secret-access-key>            # TO VERIFY with real creds
+#   S3_BUCKET              <cyfronet-bucket>/<cyfronet-key-prefix>    # TO VERIFY with real creds --
+#                          bucket AND key-prefix both required, see
+#                          hack/kind-up.sh's "CRITICAL FINDING" comment
+#   S3_REGION              <cyfronet-region, or any non-empty string>  # TO VERIFY with real creds
+#   LAKEKEEPER_URI         http://lakekeeper.lakekeeper.svc:8181       # same in-cluster Service DNS as kind
+#   LAKEKEEPER_WAREHOUSE   default
+#   RETENTION_DAYS         "14"                                        # keep in sync with ingest.retentionDays below
+#
+# retentionDays here documents the intended value the same way
+# chart/values.yaml's own field does (it is NOT read by any chart template
+# -- run-retention gets RETENTION_DAYS from the ingest-env Secret/
+# ExternalSecret above, not from Helm values); kept equal to the default
+# unless a future owner decision changes cyfronet's retention window
+# specifically.
+ingest:
+  retentionDays: "14"
