@@ -438,11 +438,26 @@ def run_maintenance(env: Mapping[str, str] | None = None) -> int:
     return _run(env)
 
 
+def run_apply_views(env: Mapping[str, str] | None = None) -> int:
+    env = env if env is not None else os.environ
+    try:
+        from alice_ingest.views import run as _run
+    except ModuleNotFoundError:
+        print(
+            "alice-ingest apply-views: not implemented yet "
+            "(lands in Plan 3 Task 2, ingest/src/alice_ingest/views.py)",
+            file=sys.stderr,
+        )
+        return 1
+    return _run(env)
+
+
 _COMMANDS = {
     "run-nightly": run_nightly,
     "run-sitesonar": run_sitesonar,
     "run-retention": run_retention,
     "run-maintenance": run_maintenance,
+    "apply-views": run_apply_views,
 }
 
 

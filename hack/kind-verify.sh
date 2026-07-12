@@ -356,6 +356,43 @@ spec:
           landing_rows = run_query("SELECT count(*) FROM landing.public.job_info")
           print(f"landing.public.job_info count={landing_rows[0][0]}")
 
+          # Hard gate (Plan 3 Task 2): the lake.contract schema's views
+          # actually select -- proves alice-ingest apply-views ran and the
+          # dtypes-contract column spellings (contract_columns.py) resolve
+          # against the live dlt-normalized columns, not just that the DDL
+          # parsed. Named columns per the brief's acceptance line; count
+          # parity against job_info (the same representative table the
+          # probe above already counted) proves the view is not silently
+          # dropping/duplicating rows relative to its base table.
+          # NOTE: no backtick characters in this comment block -- this whole
+          # pod spec lives inside an UNQUOTED cat <<PODYAML heredoc (needed
+          # for $INGEST_IMAGE to expand), so a backtick here would be
+          # evaluated by bash as command substitution before the YAML is
+          # ever emitted (verified live: caused spurious "command not
+          # found" stderr noise in this script's own output -- harmless to
+          # the JSON/YAML payload itself since it substitutes to empty
+          # string inside a Python comment, but wrong and worth avoiding).
+          contract_rows = run_query(
+              'SELECT "LPMPassName", "TTL", "Packages" '
+              'FROM lake.contract.mon_jdls_parsed LIMIT 5'
+          )
+          print(f"lake.contract.mon_jdls_parsed sample rows={len(contract_rows)}")
+          if not contract_rows:
+              print(
+                  "FAIL: lake.contract.mon_jdls_parsed returned no rows for "
+                  "LPMPassName/TTL/Packages -- has alice-ingest apply-views run?"
+              )
+              sys.exit(1)
+
+          contract_job_info_count = run_query("SELECT count(*) FROM lake.contract.job_info")[0][0]
+          print(f"lake.contract.job_info count={contract_job_info_count}")
+          if contract_job_info_count != lake_count:
+              print(
+                  f"FAIL: lake.contract.job_info count {contract_job_info_count} "
+                  f"!= lake.alice.job_info count {lake_count}"
+              )
+              sys.exit(1)
+
           print("trino-query-probe: OK")
 PODYAML
 phase=""
@@ -368,7 +405,7 @@ TRINO_PROBE_LOG=$(kubectl -n trino logs trino-query-probe 2>/dev/null || echo ""
 kubectl -n trino delete pod trino-query-probe --ignore-not-found >/dev/null 2>&1
 echo "$TRINO_PROBE_LOG"
 if [ "$phase" = "Succeeded" ] && echo "$TRINO_PROBE_LOG" | grep -q "trino-query-probe: OK"; then
-  echo "trino query probes OK (lake.alice.job_info >=900 rows, landing.public.job_info SELECT succeeds)"
+  echo "trino query probes OK (lake.alice.job_info >=900 rows, landing.public.job_info SELECT succeeds, lake.contract.mon_jdls_parsed LPMPassName/TTL/Packages return data, lake.contract.job_info count matches lake.alice.job_info)"
 else
   echo "FAIL: trino-query-probe phase=$phase"; exit 1
 fi

@@ -128,7 +128,8 @@ else
     --from-literal=LAKEKEEPER_URI="http://lakekeeper.lakekeeper.svc:8181" \
     --from-literal=LAKEKEEPER_WAREHOUSE="default" \
     --from-literal=RETENTION_DAYS="14" \
-    --from-literal=SITESONAR_LIMIT="5"
+    --from-literal=SITESONAR_LIMIT="5" \
+    --from-literal=TRINO_URI="http://trino.trino.svc:8080"
   echo "ingest-env secret created"
 fi
 # Landing read-only role for Trino's `landing` catalog (Plan 3 Task 1):
