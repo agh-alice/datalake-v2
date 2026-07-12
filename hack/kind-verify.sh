@@ -25,6 +25,13 @@ if git ls-remote --heads origin | grep -q 'refs/heads/environments/kind$'; then
 else
   echo "FAIL: hydrated branch environments/kind missing on origin"; exit 1
 fi
+# Hard gate (Task 4 review Critical): harness-provisioned secret must exist —
+# ArgoCD once pruned it after it left the chart; verify it survives reconciliation.
+if kubectl -n lakekeeper get secret lakekeeper-pg-encryption >/dev/null 2>&1; then
+  echo "lakekeeper-pg-encryption secret present"
+else
+  echo "FAIL: lakekeeper-pg-encryption secret missing"; exit 1
+fi
 # Hard gate: the probe must actually gate (Task 2/3 review pattern). A 4xx on the
 # unconfigured-warehouse query is acceptable proof of liveness; connection failure is not.
 # `kubectl run --rm -i` attaches container stdout to the client over the same session
