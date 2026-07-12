@@ -21,9 +21,31 @@ spec:
     # (Trino 480). repoURL below is byte-identical to what `helm repo add`
     # actually registered (`helm repo list` echoed back the same string,
     # no trailing slash) and to apps/project.yaml's sourceRepos entry.
+    #
+    # NOT pinned to the newest (1.42.2/480): the first live deploy attempt
+    # crash-looped every pod with `Fatal glibc error: CPU does not support
+    # x86-64-v3` (kubectl logs, verified live against this cluster, not
+    # assumed). Root-caused by diffing trinodb/trino's own Dockerfile
+    # across tags on GitHub: the image's final runtime base switched from
+    # `redhat/ubi9-micro` to `redhat/ubi10-micro` between appVersion 476
+    # (core/docker/Dockerfile at tag 476: ubi9) and 477 (tag 477: ubi10) --
+    # RHEL 10 raised its minimum microarchitecture baseline to x86-64-v3
+    # (AVX2/BMI2), which this kind host's virtualized CPU ("AMD Opteron
+    # 62xx class", /proc/cpuinfo has no avx2/bmi2 flag) does not meet. Every
+    # chart/appVersion from 1.41.0/477 through 1.42.2/480 inherits this and
+    # will not boot here. Pinned instead to the newest chart still on
+    # appVersion 476: **1.40.0** (`helm show chart trino/trino --version
+    # 1.40.0` confirms `appVersion: "476"`; chart's `image.tag` defaults to
+    # `Chart.AppVersion`, so no explicit image.tag override is needed).
+    # Confirmed working live: coordinator reached Ready and answered
+    # queries -- see task-1-report.md. This is a KIND-ONLY constraint, not
+    # a design decision -- cyfronet's real hardware is expected to support
+    # x86-64-v3 (modern server CPUs do); record this in the cyfronet
+    # sizing/runbook notes so Plan 4 re-evaluates the newest chart there
+    # instead of blindly inheriting this pin.
     repoURL: https://trinodb.github.io/charts
     chart: trino
-    targetRevision: "1.42.2"
+    targetRevision: "1.40.0"
     helm:
       valuesObject:
         # Coordinator-only on kind (resource-frugality constraint, JVM heap
