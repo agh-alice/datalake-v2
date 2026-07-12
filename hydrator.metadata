@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "ca0685586b4def2646ad33010605427625bc90e7",
+  "drySha": "ab3f7605c72166541423dd5e6330c84f651c6c5e",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T19:22:55Z",
-  "subject": "chore: pin ingest image digest for final-review wave (N1-N5)",
-  "body": "CI run 29205620324 (commit a697e5c), digest verified resolvable via the\nGHCR registry API.\n"
+  "date": "2026-07-12T19:38:18Z",
+  "subject": "chore: pin ingest image digest for mon_jdls delete-ordering fix",
+  "body": "CI run 29206122224 (commit e059924), digest verified resolvable via the\nGHCR registry API.\n"
 }
