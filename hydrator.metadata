@@ -1,7 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "a0615934a883c12b9843baa5ec8b15e24bfa3fa6",
+  "drySha": "32a1a9d85ca5dd714763de8c6caca9e3919e9b1d",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T01:49:23Z",
-  "subject": "feat: CNPG operator and lakekeeper-db cluster"
+  "date": "2026-07-12T02:34:20Z",
+  "subject": "feat: lakekeeper Iceberg REST catalog",
+  "body": "Chart 0.11.0 (appVersion 0.12.2, latest available -- repo has no 0.13.x\nappVersion release) uses a discrete host/port/database + secretRef schema\n(externalDatabase.*), not the URI-based env vars assumed by the brief;\nadapted to the CNPG lakekeeper-db-app secret's username/password keys.\n\nAlso pre-creates the Postgres-secret-store encryption key as a plain\nSecret via chart/templates/lakekeeper-pg-encryption.yaml (kind-only\ninline value, cyfronet uses an ExternalSecret) because the upstream\nchart's own auto-generated key relies on helm's `lookup`, which does\nnot work under ArgoCD's client-side render (chart values.yaml cites\nargoproj/argo-cd#5202).\n"
 }
