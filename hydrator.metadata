@@ -1,7 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "63a408b63aebc2a1ffc8492251a0759fc6aa5f2a",
+  "drySha": "1cd8853cf54f83fe0a0cfe2489eef5983604f880",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T03:33:05Z",
-  "subject": "feat: kube-prometheus-stack and failure-derived datalake alerts"
+  "date": "2026-07-12T08:51:01Z",
+  "subject": "fix: make ArgoCD drift alert fireable and CNPG alert per-cluster values-driven (review findings)",
+  "body": "Task 6 review flagged two dead/false-positive alerts:\n\n- ArgoAppOutOfSync could never fire: Task 2's ArgoCD bootstrap never enabled\n  application-controller metrics, so argocd_app_info didn't exist. Enables\n  controller.metrics.enabled in environments/kind/argocd-values.yaml (chart's\n  own serviceMonitor stays off -- ArgoCD installs before kube-prometheus-stack\n  CRDs exist on a clean-room kind-up) and adds a hand-authored ServiceMonitor\n  in chart/templates, which hydrates after kube-prometheus-stack and is safe\n  from that ordering problem.\n\n- CNPGClusterUnhealthy false-positived on every healthy cluster:\n  cnpg_pg_replication_streaming_replicas is per-pod (replicas always report 0;\n  only the primary's count reflects cluster health), so `< 1` fired on replica\n  pods and on kind's deliberately single-instance mon-data. Rewritten as\n  per-cluster (max by namespace -- the metric carries no `cluster` label,\n  verified live against Prometheus), values-driven rules rendered only when\n  HA is expected (instances > 1).\n"
 }

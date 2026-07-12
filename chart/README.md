@@ -5,6 +5,6 @@ To hydrate the manifests in this repository, run the following commands:
 ```shell
 git clone https://github.com/agh-alice/datalake-v2.git
 # cd into the cloned directory
-git checkout 63a408b63aebc2a1ffc8492251a0759fc6aa5f2a
+git checkout 1cd8853cf54f83fe0a0cfe2489eef5983604f880
 helm template . --name-template datalake-kind --values ./chart/values.yaml --values ./chart/values-kind.yaml --include-crds
 ```

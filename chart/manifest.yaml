@@ -86,10 +86,10 @@ spec:
             severity: critical
         - alert: CNPGClusterUnhealthy
           annotations:
-            description: cnpg_pg_replication_streaming_replicas has been below 1 for 15m -- HA is degraded to a single instance. E5 was the RAID0-over-4-volumes VM with zero redundancy that CNPG replaces.
+            description: cnpg_pg_replication_streaming_replicas (max across lakekeeper-db's pods, i.e. the primary's view) has been below 1 for 15m -- HA is degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy that CNPG replaces.
             incident: E5
-            summary: CNPG cluster has no streaming replicas
-          expr: cnpg_pg_replication_streaming_replicas < 1
+            summary: CNPG cluster lakekeeper-db has fewer streaming replicas than expected
+          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="lakekeeper"}) < 1
           for: 15m
           labels:
             severity: critical
@@ -111,3 +111,20 @@ spec:
           for: 1h
           labels:
             severity: warning
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-application-controller
+  namespace: monitoring
+spec:
+  endpoints:
+    - interval: 30s
+      port: http-metrics
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: application-controller
+      app.kubernetes.io/name: argocd-metrics
