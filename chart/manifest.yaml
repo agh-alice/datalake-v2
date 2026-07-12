@@ -28,6 +28,40 @@ kind: Namespace
 metadata:
   name: landing-db
 ---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pipeline-runner
+  namespace: argo-workflows
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pipeline-runner
+  namespace: argo-workflows
+rules:
+  - apiGroups:
+      - argoproj.io
+    resources:
+      - workflowtaskresults
+    verbs:
+      - create
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pipeline-runner
+  namespace: argo-workflows
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pipeline-runner
+subjects:
+  - kind: ServiceAccount
+    name: pipeline-runner
+    namespace: argo-workflows
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -64,6 +98,26 @@ spec:
       max_connections: "60"
   storage:
     size: 2Gi
+---
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: hello
+  namespace: argo-workflows
+spec:
+  concurrencyPolicy: Forbid
+  schedule: '*/5 * * * *'
+  workflowSpec:
+    entrypoint: main
+    serviceAccountName: pipeline-runner
+    templates:
+      - container:
+          command:
+            - sh
+            - -c
+            - echo hello from datalake-v2 && date
+          image: busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+        name: main
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
