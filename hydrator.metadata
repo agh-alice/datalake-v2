@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "ab3f7605c72166541423dd5e6330c84f651c6c5e",
+  "drySha": "e500de8aea73a5f555af8075587f98c29b336d1c",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T19:38:18Z",
-  "subject": "chore: pin ingest image digest for mon_jdls delete-ordering fix",
-  "body": "CI run 29206122224 (commit e059924), digest verified resolvable via the\nGHCR registry API.\n"
+  "date": "2026-07-12T23:05:54Z",
+  "subject": "chore: pin ingest image digest for contract views (apply-views)",
+  "body": "CI build from ded0d96 (feat: contract views restoring consumer column\nspellings). Digest confirmed via docker buildx imagetools inspect\nagainst the pushed manifest-list tag, matching the build-push-action\nstep's \"exporting manifest list\" log line.\n"
 }
