@@ -649,6 +649,137 @@ class TestRunRetentionPassTwoPhaseOrdering:
         assert results["mon_jdls"] == TableResult(kept=0, deleted=1, unverified=0)
 
 
+class _SqliteCursorAdapter:
+    """Adapts a real sqlite3 cursor to retention.py's psycopg2-shaped
+    calling convention: `%s` paramstyle -> sqlite3's `?`, and
+    `job_id = ANY(%s)` (an array-membership DELETE parameter) -> an
+    `IN (?, ?, ...)` list of the SAME job_ids. Used ONLY by
+    TestRunRetentionPassDeleteOrdering below, which reproduces a REAL
+    cross-table interaction (job_info's own DELETE consuming rows that
+    mon_jdls's re-asserted DELETE subquery still needs to see) that none
+    of this file's other fakes can exercise -- a fake keyed by canned
+    per-table rows never actually mutates cross-table state the way a
+    real relational DELETE does."""
+
+    def __init__(self, raw_cursor):
+        self._raw = raw_cursor
+        self.rowcount = 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, sql, params):
+        params = tuple(params)
+        if params and isinstance(params[0], (list, tuple)):
+            batch = params[0]
+            placeholders = ",".join("?" for _ in batch)
+            sql = sql.replace("job_id = ANY(%s)", f"job_id IN ({placeholders})", 1)
+            sql = sql.replace("%s", "?")
+            params = (*batch, *params[1:])
+        else:
+            sql = sql.replace("%s", "?")
+        self._raw.execute(sql, params)
+        self.rowcount = self._raw.rowcount
+
+    def fetchall(self):
+        return self._raw.fetchall()
+
+    def fetchone(self):
+        return self._raw.fetchone()
+
+
+class _SqliteConnectionAdapter:
+    """Wraps a real sqlite3 connection to match the `conn.cursor()`/
+    `conn.commit()` interface retention.py's functions call against a
+    psycopg2 connection."""
+
+    def __init__(self, raw_conn):
+        self._raw = raw_conn
+
+    def cursor(self):
+        return _SqliteCursorAdapter(self._raw.cursor())
+
+    def commit(self):
+        self._raw.commit()
+
+
+class TestRunRetentionPassDeleteOrdering:
+    """Regression, found LIVE (Plan 2 FINAL-review wave, first live nightly
+    trigger after landing N1's per-table DELETE re-assertion): re-asserting
+    mon_jdls's age predicate at DELETE time (N1) means its DELETE statement
+    re-queries job_info's CURRENT state via a subquery. `TABLES`' DECLARED
+    order is (job_info, trace, mon_jdls) -- if the delete LOOP just walked
+    `TABLES` in that order, job_info's own DELETE (first in that order)
+    would already have removed its old, verified rows by the time
+    mon_jdls's DELETE (last) ran its re-assertion subquery against
+    job_info. Those exact job_ids would then look ABSENT from job_info
+    (not "not old enough" -- genuinely gone), which the DELETE's re-
+    assertion can't distinguish from an already-orphaned row from an
+    EARLIER run -- and the bounded-orphan branch (N2) requires
+    `job_id < MIN(job_info.job_id)`, which is false for these job_ids
+    (job_info's surviving/young rows are NOT all numerically above them
+    in this fixture's data -- job_id and age are only loosely correlated).
+    Net effect: mon_jdls's DELETE matched zero of its own genuinely-old,
+    already-verified candidates -- a silent, total loss of mon_jdls
+    retention whenever job_info happens to run first.
+
+    Exercised against a REAL sqlite database (not a fake) because this bug
+    is specifically about one DELETE's real side effect on another
+    statement's live subquery -- exactly what a static per-table fake
+    cannot model."""
+
+    # job_id and age are DELIBERATELY NOT monotonically correlated here --
+    # matching hack/seed-fixture.sh's real fixture, where age derives from
+    # `gs % 30` (a wrapping remainder), not from `gs` (job_id) directly.
+    # OLD_JOB_IDS are scattered in the MIDDLE of the job_id range, with
+    # YOUNG survivors on BOTH sides (including job_id=1, the lowest of
+    # all) -- this is what makes the bug reproducible: if age correlated
+    # cleanly with job_id (e.g. "all low job_ids are old"), job_info's
+    # surviving MINIMUM job_id would shift safely above every deleted
+    # job_id after its own delete, and N2's orphan bound
+    # (`job_id < MIN(job_info.job_id)`) would accidentally still match --
+    # masking this exact bug, which is precisely what happened in this
+    # test's first draft.
+    _OLD_JOB_IDS = (10, 11, 12, 13, 14)
+    _YOUNG_JOB_IDS = (1, 2, 20, 21, 22)
+
+    @classmethod
+    def _build_db(cls):
+        db = sqlite3.connect(":memory:")
+        db.create_function("to_timestamp", 1, lambda x: x)  # trace stays empty; see below
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE trace (job_id INTEGER, laststatuschangetimestamp INTEGER)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        rows = [(jid, "2020-01-01") for jid in cls._OLD_JOB_IDS] + [
+            (jid, "2030-01-01") for jid in cls._YOUNG_JOB_IDS
+        ]
+        db.executemany("INSERT INTO job_info (job_id, last_update) VALUES (?, ?)", rows)
+        all_job_ids = cls._OLD_JOB_IDS + cls._YOUNG_JOB_IDS
+        db.executemany("INSERT INTO mon_jdls (job_id) VALUES (?)", [(jid,) for jid in all_job_ids])
+        db.commit()
+        return db
+
+    def test_mon_jdls_delete_still_removes_its_candidates_when_job_info_deletes_first(self):
+        db = self._build_db()
+        conn = _SqliteConnectionAdapter(db)
+        all_job_ids = set(self._OLD_JOB_IDS) | set(self._YOUNG_JOB_IDS)
+        catalog = FakePresenceCatalog(present=all_job_ids)  # everything verified
+        cutoffs = {"naive": datetime(2026, 1, 1), "aware": datetime(2026, 1, 1)}
+
+        results = run_retention_pass(conn, catalog, cutoffs)
+
+        assert results["job_info"] == TableResult(kept=0, deleted=5, unverified=0)
+        assert results["mon_jdls"] == TableResult(kept=0, deleted=5, unverified=0)
+
+        remaining_job_info = {r[0] for r in db.execute("SELECT job_id FROM job_info").fetchall()}
+        remaining_mon_jdls = {r[0] for r in db.execute("SELECT job_id FROM mon_jdls").fetchall()}
+        assert remaining_job_info == set(self._YOUNG_JOB_IDS)
+        assert remaining_mon_jdls == set(self._YOUNG_JOB_IDS)
+
+
 class TestMonJdlsOrphanEligibility:
     """Fix 2 (review, important): the pre-fix INNER JOIN made a landing
     mon_jdls row permanently un-collectible once its parent job_info row

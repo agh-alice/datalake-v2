@@ -267,6 +267,41 @@ TABLES: tuple[RetentionTable, ...] = (
     ),
 )
 
+# Delete-loop ordering -- DISTINCT from TABLES' declaration order above
+# (which drives collection and run()'s per-table print order; changing
+# THAT order is not needed and would just reshuffle report output).
+#
+# Found live (Plan 2 FINAL-review wave, first live nightly trigger after
+# landing N1's per-table DELETE re-assertion): mon_jdls's DELETE
+# re-asserts its age predicate via a subquery that reads job_info's
+# CURRENT (live) state (module docstring, N1). If job_info's own DELETE
+# runs BEFORE mon_jdls's in the same pass -- TABLES' declared order does
+# exactly that, job_info first -- job_info's old rows are already gone by
+# the time mon_jdls's re-assertion subquery runs. Those job_ids then look
+# ABSENT from job_info, which N2's bounded-orphan branch can only excuse
+# when `job_id < MIN(job_info.job_id)` -- false whenever job_info's
+# surviving (young) rows include job_ids numerically BELOW the ones being
+# retained-away (real fixture data: age derives from `gs % 30`, not from
+# job_id directly, so this is the common case, not an edge case). Net
+# effect without this reordering: mon_jdls's DELETE matches zero of its
+# own genuinely-old, already-verified candidates -- a silent, total loss
+# of mon_jdls retention. Running mon_jdls's classify_and_delete BEFORE
+# job_info's closes this: mon_jdls's re-assertion subquery then observes
+# job_info exactly as the initial SELECT phase did (job_info's own delete
+# for THIS pass hasn't happened yet), while still correctly catching a
+# genuine external TOCTOU revival (N1's actual target) and still correctly
+# excluding a genuinely pre-existing orphan (N2). trace's delete has no
+# such dependency (its age predicate never references job_info), so its
+# relative position doesn't matter -- it's left in TABLES' original slot.
+# See tests/test_retention.py's TestRunRetentionPassDeleteOrdering for the
+# real-sqlite regression proof (a canned-fake connection cannot exercise
+# this -- it never actually mutates cross-table state the way a real
+# DELETE does).
+_DELETE_ORDER: tuple[RetentionTable, ...] = (
+    next(t for t in TABLES if t.landing_table == "mon_jdls"),
+    *(t for t in TABLES if t.landing_table != "mon_jdls"),
+)
+
 
 @dataclass(frozen=True)
 class TableResult:
@@ -440,13 +475,19 @@ def run_retention_pass(
     candidate set decodes to an implausible calendar range, aborting the
     whole pass -- no table's delete (not just trace's) executes in that
     case.
+
+    The DELETE loop below walks `_DELETE_ORDER`, not `TABLES` -- a second,
+    narrower ordering constraint on top of the two-phase collection above
+    (N1's per-table DELETE re-assertion added a new cross-table dependency
+    of its own; see `_DELETE_ORDER`'s comment for the live regression this
+    closes).
     """
     old_job_ids_by_table = {
         table.landing_table: select_old_job_ids(conn, table, cutoffs) for table in TABLES
     }
     check_trace_plausibility(conn, old_job_ids_by_table["trace"])
     results: dict[str, TableResult] = {}
-    for table in TABLES:
+    for table in _DELETE_ORDER:
         results[table.landing_table] = classify_and_delete(
             conn,
             presence_catalog,
