@@ -25,6 +25,26 @@ Env-var contract (brief, Task 2 Interfaces):
                          non-empty string satisfies the S3 SDK -- documented
                          here rather than silently hardcoded)
 
+    Backfill overrides (Plan 2 Task 6; all optional, absent = unchanged
+    default behavior; mechanism + worked examples in docs/runbooks/
+    backfill.md, this is the env-var contract only):
+    INGEST_INITIAL_JOB_INFO  overrides job_info's `last_update` incremental
+                         cursor start (default pendulum.naive(2026, 1, 1)).
+                         ISO date (`2026-03-01`) or date-time
+                         (`2026-03-01T00:00:00`) -- NAIVE only, no UTC
+                         offset (SystemExit if one is given; see the
+                         aware/naive warning above -- an offset here would
+                         reproduce the exact bug this module already had to
+                         fix once).
+    INGEST_INITIAL_TRACE  overrides trace's `laststatuschangetimestamp`
+                         incremental cursor start (default 0). Plain integer,
+                         same epoch-MILLISECONDS unit as the column itself
+                         (retention.py's module docstring) -- pipeline.py
+                         does no unit conversion, the value is handed to
+                         dlt's incremental cursor as-is.
+    INGEST_INITIAL_MON_JDLS  overrides mon_jdls's `job_id` incremental
+                         cursor start (default 0). Plain integer.
+
 Watermark note (per-table, corrected against production ground truth --
 research/2026-07-12_ml-consumer-data-contract.md, "Production schema ground
 truth", verified live against information_schema on mon_data 2026-07-12):
@@ -51,6 +71,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from datetime import datetime
 from typing import Mapping
 
 import dlt
@@ -73,6 +94,14 @@ _REQUIRED_ENV_VARS = (
     "LAKEKEEPER_WAREHOUSE",
 )
 
+# Backfill initial_value overrides (Plan 2 Task 6, docs/runbooks/
+# backfill.md) -- optional, never required/validated by _check_required_env;
+# absence means "use the table's normal default" (see build_job_info_source/
+# build_trace_source/build_mon_jdls_resource below).
+ENV_INITIAL_JOB_INFO = "INGEST_INITIAL_JOB_INFO"
+ENV_INITIAL_TRACE = "INGEST_INITIAL_TRACE"
+ENV_INITIAL_MON_JDLS = "INGEST_INITIAL_MON_JDLS"
+
 
 def _require_env(env: Mapping[str, str], name: str) -> str:
     value = env.get(name)
@@ -87,6 +116,71 @@ def _check_required_env(env: Mapping[str, str]) -> None:
         raise SystemExit(
             "alice-ingest: missing required env var(s): " + ", ".join(missing)
         )
+
+
+def _resolve_naive_initial_value(
+    env: Mapping[str, str], var_name: str, default: "pendulum.DateTime"
+) -> "pendulum.DateTime":
+    """Backfill env-var hook (docs/runbooks/backfill.md): override a
+    naive-cursor table's dlt incremental `initial_value` from an ISO
+    date/date-time string, no code edit required. Falls back to `default`
+    when `var_name` is unset or empty.
+
+    Parses with stdlib `datetime.fromisoformat`, NOT `pendulum.parse` --
+    pendulum.parse's default `tz='UTC'` would silently attach a timezone to
+    a value meant for a `timestamp WITHOUT time zone` column (see this
+    module's docstring on why an aware literal against a naive column is a
+    real bug, not a style choice: it forces a session-timezone cast in SQL
+    pushdown and silently shifts the cursor -- the exact class of bug fixed
+    once already in a610069). An explicit UTC offset in the input is
+    therefore refused (SystemExit) rather than silently dropped or honored.
+    """
+    raw = env.get(var_name)
+    if not raw:
+        return default
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"alice-ingest: invalid {var_name}={raw!r}: expected an ISO "
+            f"date (2026-03-01) or date-time (2026-03-01T00:00:00): {exc}"
+        ) from exc
+    if parsed.tzinfo is not None:
+        raise SystemExit(
+            f"alice-ingest: invalid {var_name}={raw!r}: must be naive (no "
+            f"UTC offset) -- this cursor's column is `timestamp WITHOUT "
+            f"time zone`; an aware literal would silently shift it "
+            f"(see pipeline.py's module docstring)"
+        )
+    return pendulum.naive(
+        parsed.year,
+        parsed.month,
+        parsed.day,
+        parsed.hour,
+        parsed.minute,
+        parsed.second,
+        parsed.microsecond,
+    )
+
+
+def _resolve_int_initial_value(env: Mapping[str, str], var_name: str, default: int) -> int:
+    """Backfill env-var hook (docs/runbooks/backfill.md): override an
+    integer-cursor table's (trace's epoch-ms `laststatuschangetimestamp`,
+    mon_jdls's `job_id`) dlt incremental `initial_value` from a plain
+    integer string. Falls back to `default` when `var_name` is unset or
+    empty. No unit conversion is performed -- the parsed integer is handed
+    straight to dlt's incremental cursor, same as the hardcoded defaults it
+    replaces.
+    """
+    raw = env.get(var_name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"alice-ingest: invalid {var_name}={raw!r}: must be an integer"
+        ) from exc
 
 
 def iceberg_catalog_properties(env: Mapping[str, str]) -> dict[str, str]:
@@ -167,7 +261,7 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     dlt.config["destination.filesystem.iceberg_use_catalog_purge"] = False
 
 
-def build_job_info_source(pg_url: str):
+def build_job_info_source(pg_url: str, env: Mapping[str, str] | None = None):
     """job_info: connectorx backend (fast, columnar; no per-row transform needed).
 
     Incremental cursor is `last_update`. Production's column is `timestamp
@@ -177,14 +271,20 @@ def build_job_info_source(pg_url: str):
     NOT the tz-aware `pendulum.datetime(...)`: an aware literal pushed down
     against a naive `timestamp` column forces a session-timezone cast in the
     SQL comparison, which silently shifts the incremental cursor.
+
+    `initial_value` defaults to `pendulum.naive(2026, 1, 1)` but is
+    overridable via `INGEST_INITIAL_JOB_INFO` (docs/runbooks/backfill.md,
+    Plan 2 Task 6) -- `_resolve_naive_initial_value` above.
     """
+    env = env if env is not None else os.environ
+    initial_value = _resolve_naive_initial_value(
+        env, ENV_INITIAL_JOB_INFO, pendulum.naive(2026, 1, 1)
+    )
     source = sql_database(
         credentials=pg_url, backend="connectorx", chunk_size=100_000
     ).with_resources("job_info")
     source.job_info.apply_hints(
-        incremental=dlt.sources.incremental(
-            "last_update", initial_value=pendulum.naive(2026, 1, 1)
-        ),
+        incremental=dlt.sources.incremental("last_update", initial_value=initial_value),
         primary_key="job_id",
         write_disposition={"disposition": "merge", "strategy": "upsert"},
         schema_contract={"columns": "evolve", "data_type": "freeze"},
@@ -193,20 +293,26 @@ def build_job_info_source(pg_url: str):
     return source
 
 
-def build_trace_source(pg_url: str):
+def build_trace_source(pg_url: str, env: Mapping[str, str] | None = None):
     """trace: connectorx backend. Production has NO `last_update` column on
     `trace` (research/2026-07-12_ml-consumer-data-contract.md, "Production
     schema ground truth" -- all 18 production columns enumerated there, none
     named `last_update`; an earlier fixture incorrectly added one, corrected
     in Task 3's review). Incremental cursor is `laststatuschangetimestamp`
     (bigint epoch, not a timestamp type), initial_value=0.
+
+    `initial_value` is overridable via `INGEST_INITIAL_TRACE` (docs/
+    runbooks/backfill.md, Plan 2 Task 6) -- `_resolve_int_initial_value`
+    above.
     """
+    env = env if env is not None else os.environ
+    initial_value = _resolve_int_initial_value(env, ENV_INITIAL_TRACE, 0)
     source = sql_database(
         credentials=pg_url, backend="connectorx", chunk_size=100_000
     ).with_resources("trace")
     source.trace.apply_hints(
         incremental=dlt.sources.incremental(
-            "laststatuschangetimestamp", initial_value=0
+            "laststatuschangetimestamp", initial_value=initial_value
         ),
         primary_key="job_id",
         write_disposition={"disposition": "merge", "strategy": "upsert"},
@@ -216,21 +322,27 @@ def build_trace_source(pg_url: str):
     return source
 
 
-def build_mon_jdls_resource(pg_url: str):
+def build_mon_jdls_resource(pg_url: str, env: Mapping[str, str] | None = None):
     """mon_jdls -> mon_jdls_parsed: MUST use the sqlalchemy backend.
 
     add_map(parse_jdl) requires row dicts; connectorx/pyarrow backends yield
     pyarrow.Table items and silently skip per-row maps (verified 2026-07-12,
     research doc). Watermark is `job_id` (see module docstring): mon_jdls has
     no last_update column in the gen-1 schema.
+
+    `initial_value` is overridable via `INGEST_INITIAL_MON_JDLS` (docs/
+    runbooks/backfill.md, Plan 2 Task 6) -- `_resolve_int_initial_value`
+    above.
     """
+    env = env if env is not None else os.environ
+    initial_value = _resolve_int_initial_value(env, ENV_INITIAL_MON_JDLS, 0)
     resource = sql_table(
         credentials=pg_url, table="mon_jdls", backend="sqlalchemy", chunk_size=20_000
     )
     resource.add_map(parse_jdl)
     resource.apply_hints(
         table_name="mon_jdls_parsed",
-        incremental=dlt.sources.incremental("job_id", initial_value=0),
+        incremental=dlt.sources.incremental("job_id", initial_value=initial_value),
         primary_key="job_id",
         write_disposition={"disposition": "merge", "strategy": "upsert"},
         schema_contract={"columns": "evolve", "data_type": "freeze"},
@@ -251,15 +363,15 @@ def run_nightly(env: Mapping[str, str] | None = None) -> int:
         dataset_name=DATASET_NAME,
     )
 
-    job_info_source = build_job_info_source(pg_url)
+    job_info_source = build_job_info_source(pg_url, env)
     load_info = pipeline.run(job_info_source)
     print(load_info)
 
-    trace_source = build_trace_source(pg_url)
+    trace_source = build_trace_source(pg_url, env)
     load_info = pipeline.run(trace_source)
     print(load_info)
 
-    mon_jdls_resource = build_mon_jdls_resource(pg_url)
+    mon_jdls_resource = build_mon_jdls_resource(pg_url, env)
     load_info = pipeline.run(mon_jdls_resource)
     print(load_info)
 
