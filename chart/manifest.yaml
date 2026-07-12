@@ -122,6 +122,71 @@ spec:
     ttlStrategy:
       secondsAfterCompletion: 3600
 ---
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: ingest-nightly
+  namespace: argo-workflows
+spec:
+  concurrencyPolicy: Forbid
+  schedules:
+    - '*/15 * * * *'
+  workflowSpec:
+    entrypoint: main
+    serviceAccountName: pipeline-runner
+    templates:
+      - dag:
+          tasks:
+            - name: run-nightly
+              template: run-nightly
+            - dependencies:
+                - run-nightly
+              name: run-retention
+              template: run-retention
+        name: main
+      - container:
+          args:
+            - run-nightly
+          envFrom:
+            - secretRef:
+                name: ingest-env
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:7f7f789c18db54393845c246606fd3c126a85795b7ffe46632fd0194d40ed891
+        name: run-nightly
+      - container:
+          args:
+            - run-retention
+          envFrom:
+            - secretRef:
+                name: ingest-env
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:7f7f789c18db54393845c246606fd3c126a85795b7ffe46632fd0194d40ed891
+        name: run-retention
+    ttlStrategy:
+      secondsAfterCompletion: 86400
+---
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: ingest-sitesonar
+  namespace: argo-workflows
+spec:
+  concurrencyPolicy: Forbid
+  schedules:
+    - '*/20 * * * *'
+  workflowSpec:
+    entrypoint: main
+    serviceAccountName: pipeline-runner
+    templates:
+      - container:
+          args:
+            - run-sitesonar
+          envFrom:
+            - secretRef:
+                name: ingest-env
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:7f7f789c18db54393845c246606fd3c126a85795b7ffe46632fd0194d40ed891
+        name: main
+    ttlStrategy:
+      secondsAfterCompletion: 86400
+---
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
