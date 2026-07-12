@@ -5,3 +5,8 @@ namespaces:
   - argo-workflows
   - lakekeeper
   - landing-db
+
+lakekeeperDb:
+  instances: 2
+  storageSize: 5Gi
+  enablePodMonitor: false   # true in Task 6

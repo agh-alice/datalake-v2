@@ -1,0 +1,16 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: lakekeeper-db
+  namespace: lakekeeper
+spec:
+  instances: {{ .Values.lakekeeperDb.instances }}
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  storage:
+    size: {{ .Values.lakekeeperDb.storageSize }}
+  bootstrap:
+    initdb:
+      database: lakekeeper
+      owner: lakekeeper
+  monitoring:
+    enablePodMonitor: {{ .Values.lakekeeperDb.enablePodMonitor }}
