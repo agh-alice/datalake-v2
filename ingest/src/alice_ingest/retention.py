@@ -106,28 +106,71 @@ BATCH_SIZE = 10_000
 # --------------------------------------------------------------------------
 
 _JOB_INFO_AGE_SQL = "SELECT DISTINCT job_id FROM job_info WHERE last_update < %s"
-_JOB_INFO_DELETE_SQL = "DELETE FROM job_info WHERE job_id = ANY(%s)"
+# AND last_update < %s (final-review N1, important -- TOCTOU): the pre-fix
+# form was `WHERE job_id = ANY(%s)` alone. A row whose `last_update`
+# advances past the cutoff between the candidate SELECT and this DELETE
+# (the job "revives") was deleted anyway -- silently discarding the
+# revival's newest update, which never gets a chance to be ingested before
+# its landing row disappears. Re-asserting the SAME age predicate here
+# closes the window: only rows still genuinely older than `cutoff` at
+# DELETE time are removed, cutoff bound as the second parameter. See
+# tests/test_retention.py's TestDeleteReassertsAgePredicateTOCTOU for the
+# behavioral proof (revived row survives; non-revived rows still deleted).
+_JOB_INFO_DELETE_SQL = "DELETE FROM job_info WHERE job_id = ANY(%s) AND last_update < %s"
 
 # / 1000.0 -- epoch MILLISECONDS -> seconds, per this module's docstring.
 _TRACE_AGE_SQL = (
     "SELECT DISTINCT job_id FROM trace "
     "WHERE to_timestamp(laststatuschangetimestamp / 1000.0) < %s"
 )
-_TRACE_DELETE_SQL = "DELETE FROM trace WHERE job_id = ANY(%s)"
+# Same N1 TOCTOU re-assertion as job_info's DELETE above, on trace's own
+# epoch-ms age column.
+_TRACE_DELETE_SQL = (
+    "DELETE FROM trace WHERE job_id = ANY(%s) "
+    "AND to_timestamp(laststatuschangetimestamp / 1000.0) < %s"
+)
 
 # mon_jdls has no timestamp of its own -- join to job_info.last_update.
-# LEFT JOIN (not INNER) + "OR j.job_id IS NULL" (review Fix 2, important):
-# a mon_jdls row whose job_info parent was already retained (deleted) by a
-# previous run is an ORPHAN, not "not old enough" -- an INNER JOIN would
-# silently and permanently hide it from every future candidate set. See
-# this module's docstring and TestMonJdlsOrphanEligibility in
-# tests/test_retention.py for the behavioral regression proof.
+# LEFT JOIN (not INNER) + a bounded orphan escape hatch (review Fix 2 /
+# final-review N2, important): a mon_jdls row whose job_info parent was
+# already retained (deleted) by a previous run is an ORPHAN, not "not old
+# enough" -- an INNER JOIN would silently and permanently hide it from
+# every future candidate set. The escape hatch used to be unconditional
+# (`OR j.job_id IS NULL`), which made a BRAND NEW mon_jdls row an instant
+# candidate too, whenever its own job_info parent insert simply hadn't
+# landed yet (ordinary ingestion ordering, not retirement). Bounded here
+# (N2): an orphan is only eligible when its job_id is BELOW the oldest
+# currently-surviving job_info row -- since job_id is monotonically
+# increasing in the source system (pipeline.py's module docstring), a
+# parent that was genuinely retained away is always numerically below
+# every survivor, while a parent that merely hasn't landed yet belongs to
+# a job_id at or above the current maximum, never below the minimum.
+# COALESCE(..., 0): an empty job_info table (fresh reset) pins the floor
+# at 0 rather than leaving the bound NULL (which would make every
+# `m.job_id < NULL` comparison false via SQL's three-valued logic). See
+# this module's docstring and TestMonJdlsOrphanEligibility /
+# TestMonJdlsOrphanEligibilityBounded in tests/test_retention.py for the
+# behavioral proofs.
 _MON_JDLS_AGE_SQL = (
     "SELECT DISTINCT m.job_id FROM mon_jdls m "
     "LEFT JOIN job_info j ON j.job_id = m.job_id "
-    "WHERE j.last_update < %s OR j.job_id IS NULL"
+    "WHERE j.last_update < %s OR (j.job_id IS NULL "
+    "AND m.job_id < (SELECT COALESCE(MIN(job_id), 0) FROM job_info))"
 )
-_MON_JDLS_DELETE_SQL = "DELETE FROM mon_jdls WHERE job_id = ANY(%s)"
+# N1 TOCTOU re-assertion for mon_jdls, respecting N2's bounded orphan
+# condition: a candidate job_id is only actually deleted if, AT DELETE
+# TIME, it is either (a) still joined to a job_info row whose last_update
+# is still older than cutoff, or (b) still a bounded orphan (no job_info
+# row, AND below the current minimum surviving job_id). Either the parent
+# revives (case a's subquery excludes it) or a parent shows up between
+# SELECT and DELETE (case b's NOT IN excludes it) -- both TOCTOU windows
+# are closed by the same two-branch re-assertion the age predicate uses.
+_MON_JDLS_DELETE_SQL = (
+    "DELETE FROM mon_jdls WHERE job_id = ANY(%s) AND ("
+    "job_id IN (SELECT job_id FROM job_info WHERE last_update < %s) "
+    "OR (job_id NOT IN (SELECT job_id FROM job_info) "
+    "AND job_id < (SELECT COALESCE(MIN(job_id), 0) FROM job_info)))"
+)
 
 
 # --------------------------------------------------------------------------
@@ -308,11 +351,20 @@ def classify_and_delete(
     presence_catalog: IcebergPresenceCatalog,
     table: RetentionTable,
     old_job_ids: Sequence[int],
+    cutoff: datetime,
 ) -> TableResult:
     """Core presence-check + delete orchestration (brief, Step 1's three
     cases). `old_job_ids` are job_ids already known to be older than
-    cutoff (select_old_job_ids's job); this function only decides, for
-    each, whether it is safe to delete."""
+    `cutoff` as of the candidate SELECT (select_old_job_ids's job); this
+    function only decides, for each, whether it is safe to delete.
+
+    `cutoff` is re-bound into every DELETE statement (final-review N1,
+    important -- TOCTOU): each table's `delete_sql` now re-asserts the same
+    age predicate the SELECT used, so a row that was old at SELECT time but
+    has since revived (its age column advanced past `cutoff` in the window
+    between the SELECT and this DELETE) is excluded at DELETE time rather
+    than removed anyway. See retention.py's per-table SQL comments and
+    tests/test_retention.py's TestDeleteReassertsAgePredicateTOCTOU."""
     old_job_ids = list(old_job_ids)
     if not old_job_ids:
         return TableResult(kept=0, deleted=0, unverified=0)
@@ -325,7 +377,7 @@ def classify_and_delete(
     for i in range(0, len(verified), BATCH_SIZE):
         batch = verified[i : i + BATCH_SIZE]
         with conn.cursor() as cur:
-            cur.execute(table.delete_sql, (batch,))
+            cur.execute(table.delete_sql, (batch, cutoff))
             deleted += cur.rowcount
         conn.commit()  # bounded transaction: one commit per <=BATCH_SIZE batch
 
@@ -353,7 +405,9 @@ def retain_table(
     one run -- see run_retention_pass()'s docstring for why that ordering
     is unsafe when one table's age predicate joins to another's."""
     old_job_ids = select_old_job_ids(conn, table, cutoffs)
-    return classify_and_delete(conn, presence_catalog, table, old_job_ids)
+    return classify_and_delete(
+        conn, presence_catalog, table, old_job_ids, cutoffs[table.cutoff_kind]
+    )
 
 
 def run_retention_pass(
@@ -394,7 +448,11 @@ def run_retention_pass(
     results: dict[str, TableResult] = {}
     for table in TABLES:
         results[table.landing_table] = classify_and_delete(
-            conn, presence_catalog, table, old_job_ids_by_table[table.landing_table]
+            conn,
+            presence_catalog,
+            table,
+            old_job_ids_by_table[table.landing_table],
+            cutoffs[table.cutoff_kind],
         )
     return results
 

@@ -116,6 +116,27 @@ def fetch_and_parse(url: str, session: requests.Session) -> Iterator[dict]:
             continue
 
 
+def _resolve_limit(limit: int | None, env: Mapping[str, str]) -> int | None:
+    """Resolve the effective site-sonar fetch limit (final-review N5-part):
+    an explicit `--limit` CLI value always wins; otherwise fall back to the
+    `SITESONAR_LIMIT` env var. Unset/empty env var means "no limit" (fetch
+    every new file), same as omitting `--limit` -- the kind-only bound
+    (`hack/kind-up.sh`'s `ingest-env` Secret sets `SITESONAR_LIMIT=5`;
+    cyfronet leaves it unset, see docs/runbooks/ingestion-pipeline.md's
+    env-var contract table) never silently caps a real production run."""
+    if limit is not None:
+        return limit
+    raw = env.get("SITESONAR_LIMIT")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise SystemExit(
+            f"alice-ingest: invalid SITESONAR_LIMIT={raw!r}: must be an integer"
+        ) from exc
+
+
 def select_files_to_fetch(
     files: Sequence[tuple[int, str]], high_water_mark: int
 ) -> list[tuple[int, str]]:
@@ -157,7 +178,14 @@ def _iter_rows(
     )
 
     max_epoch_fetched = high_water_mark
-    for epoch, url in new_files:
+    total = len(new_files)
+    for i, (epoch, url) in enumerate(new_files, start=1):
+        # Per-file progress line (final-review N5-part, minor): a real
+        # cyfronet backlog run can be 1740+ files (module docstring) with
+        # nothing else printed between the summary line above and
+        # completion -- this gives an operator watching pod logs a live
+        # n/total signal instead of silence for however long the run takes.
+        print(f"SITESONAR file {i}/{total} epoch={epoch} url={url}")
         yield from fetch_and_parse(url, session)
         if epoch > max_epoch_fetched:
             max_epoch_fetched = epoch
@@ -194,9 +222,16 @@ def build_site_sonar_resource(env: Mapping[str, str], limit: int | None = None):
 
 
 def run(env: Mapping[str, str] | None = None, limit: int | None = None) -> int:
-    """Entry point wired from pipeline.py's `run_sitesonar` CLI command."""
+    """Entry point wired from pipeline.py's `run_sitesonar` CLI command.
+
+    `limit` (the `--limit` CLI flag) always wins when given explicitly;
+    otherwise falls back to the `SITESONAR_LIMIT` env var (`_resolve_limit`,
+    final-review N5-part) -- unifies the two so a bound can be set either
+    per-invocation (CLI, e.g. Task 4's e2e probe) or persistently via the
+    pod's env (kind's `ingest-env` Secret, `hack/kind-up.sh`)."""
     env = env if env is not None else os.environ
     configure_dlt(env)
+    limit = _resolve_limit(limit, env)
 
     pipeline = dlt.pipeline(
         pipeline_name="alice_ingest_sitesonar",

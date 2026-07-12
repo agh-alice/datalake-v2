@@ -333,6 +333,22 @@ def build_mon_jdls_resource(pg_url: str, env: Mapping[str, str] | None = None):
     `initial_value` is overridable via `INGEST_INITIAL_MON_JDLS` (docs/
     runbooks/backfill.md, Plan 2 Task 6) -- `_resolve_int_initial_value`
     above.
+
+    `max_table_nesting = 1` (final-review N3, controller decision): without
+    it, dlt spins JDL list fields (e.g. `Packages`) off into a CHILD TABLE
+    (`mon_jdls_parsed__jdl__packages`, one row per list item) instead of
+    landing them as a VALUE column on `mon_jdls_parsed` -- the ML
+    consumer's data contract expects Packages as a column. Verified
+    empirically against the pinned dlt 1.28.2 (ingest/tests/test_pipeline.py,
+    TestMaxTableNestingSuppressesChildTables): this is a settable PROPERTY
+    on `DltResource` (`dlt/extract/resource.py`), NOT an `apply_hints()`
+    kwarg -- `apply_hints()` takes no `max_table_nesting` parameter at all
+    in 1.28.2. `max_table_nesting=1` is the specific value that keeps
+    ordinary dict flattening (`jdl__ttl`, `jdl__lpm_pass_name`, etc.)
+    working while demoting list fields to JSON-typed columns instead of
+    child tables; `max_table_nesting=0` would suppress the dict flattening
+    too (collapses the whole `jdl` field into one JSON column), which is
+    NOT what's wanted here.
     """
     env = env if env is not None else os.environ
     initial_value = _resolve_int_initial_value(env, ENV_INITIAL_MON_JDLS, 0)
@@ -348,6 +364,7 @@ def build_mon_jdls_resource(pg_url: str, env: Mapping[str, str] | None = None):
         schema_contract={"columns": "evolve", "data_type": "freeze"},
         table_format="iceberg",
     )
+    resource.max_table_nesting = 1
     return resource
 
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timezone
+from typing import Sequence
 
 import pytest
 
@@ -135,6 +136,13 @@ TRACE_TABLE = next(t for t in TABLES if t.landing_table == "trace")
 MON_JDLS_TABLE = next(t for t in TABLES if t.landing_table == "mon_jdls")
 
 
+#: Standard cutoff used by tests that don't care about its exact value --
+#: classify_and_delete now threads a cutoff through to the DELETE statement
+#: (N1 fix below), so every call site needs one even when the test's focus
+#: is elsewhere (batching, presence-check cases, etc.).
+_CUTOFF = datetime(2026, 1, 1)
+
+
 class TestClassifyAndDeletePresenceCheckCases:
     """The three cases named explicitly in the brief (Step 1)."""
 
@@ -142,7 +150,7 @@ class TestClassifyAndDeletePresenceCheckCases:
         conn = FakeConnection()
         catalog = FakePresenceCatalog(present={1, 2, 3})
 
-        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2, 3])
+        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2, 3], _CUTOFF)
 
         assert result == TableResult(kept=0, deleted=3, unverified=0)
         assert conn.commits == 1
@@ -153,7 +161,7 @@ class TestClassifyAndDeletePresenceCheckCases:
         catalog = FakePresenceCatalog(present=set())
 
         with caplog.at_level(logging.WARNING):
-            result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [10, 11])
+            result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [10, 11], _CUTOFF)
 
         assert result == TableResult(kept=2, deleted=0, unverified=2)
         assert conn.executed == []  # nothing deleted
@@ -171,7 +179,7 @@ class TestClassifyAndDeletePresenceCheckCases:
         conn = FakeConnection()
         catalog = FakePresenceCatalog(present={1, 2, 3})
 
-        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [])
+        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [], _CUTOFF)
 
         assert result == TableResult(kept=0, deleted=0, unverified=0)
         assert catalog.calls == []
@@ -182,9 +190,25 @@ class TestClassifyAndDeletePresenceCheckCases:
         conn = FakeConnection()
         catalog = FakePresenceCatalog(present={1, 3})
 
-        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2, 3, 4])
+        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2, 3, 4], _CUTOFF)
 
         assert result == TableResult(kept=2, deleted=2, unverified=2)
+
+    def test_delete_statement_carries_the_cutoff_as_its_second_parameter(self):
+        # N1 (review important, TOCTOU): the DELETE must re-assert the age
+        # predicate, not just `WHERE job_id = ANY(%s)` -- so the cutoff has
+        # to travel to the DELETE execute() call too, as a second bound
+        # parameter (never string-formatted -- same SQL discipline as the
+        # SELECT side).
+        conn = FakeConnection()
+        catalog = FakePresenceCatalog(present={1, 2})
+        cutoff = datetime(2026, 5, 1)
+
+        classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2], cutoff)
+
+        sql, params = conn.executed[0]
+        assert params == ([1, 2], cutoff)
+        assert "2026" not in sql  # cutoff never string-formatted into SQL text
 
 
 class TestClassifyAndDeleteBatching:
@@ -200,7 +224,7 @@ class TestClassifyAndDeleteBatching:
         conn = FakeConnection()
         catalog = FakePresenceCatalog(present={1, 2, 3, 4, 5})
 
-        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2, 3, 4, 5])
+        result = classify_and_delete(conn, catalog, JOB_INFO_TABLE, [1, 2, 3, 4, 5], _CUTOFF)
 
         assert result == TableResult(kept=0, deleted=5, unverified=0)
         assert conn.commits == 3  # batches of 2, 2, 1
@@ -224,6 +248,35 @@ class TestPerTableSqlDiscipline:
         assert "%s" in table.delete_sql
         assert "{" not in table.delete_sql and "}" not in table.delete_sql
 
+    @pytest.mark.parametrize("table", TABLES, ids=[t.landing_table for t in TABLES])
+    def test_delete_sql_carries_exactly_two_placeholders_batch_and_cutoff(self, table):
+        # N1 (review important, TOCTOU): the pre-fix DELETE was
+        # `WHERE job_id = ANY(%s)` alone -- a row whose age-predicate column
+        # was updated (the job "revived") between the candidate SELECT and
+        # this DELETE would be removed anyway, silently losing whatever the
+        # revival wrote. Every delete_sql must now re-assert the age
+        # predicate too, which means exactly two bound parameters: the
+        # candidate batch, and the same cutoff the SELECT used.
+        assert table.delete_sql.count("%s") == 2
+
+    def test_job_info_delete_sql_reasserts_last_update_predicate(self):
+        assert "last_update" in JOB_INFO_TABLE.delete_sql
+        assert "<" in JOB_INFO_TABLE.delete_sql
+
+    def test_trace_delete_sql_reasserts_epoch_ms_predicate(self):
+        assert "laststatuschangetimestamp" in TRACE_TABLE.delete_sql
+        assert "1000" in TRACE_TABLE.delete_sql
+        assert "<" in TRACE_TABLE.delete_sql
+
+    def test_mon_jdls_delete_sql_reasserts_join_predicate_and_orphan_bound(self):
+        # Re-assert age via the same job_info-join shape the SELECT uses
+        # (N1), respecting N2's bounded-orphan condition rather than the
+        # old unconditional `OR job_id IS NULL` escape hatch.
+        assert "job_info" in MON_JDLS_TABLE.delete_sql
+        assert "last_update" in MON_JDLS_TABLE.delete_sql
+        assert "not in" in MON_JDLS_TABLE.delete_sql.lower()
+        assert "min(job_id)" in MON_JDLS_TABLE.delete_sql.lower()
+
     def test_select_old_job_ids_passes_cutoff_as_a_param_not_interpolated(self):
         rows = [(1,), (2,), (3,)]
         conn = FakeSelectConnection(rows)
@@ -236,6 +289,185 @@ class TestPerTableSqlDiscipline:
         sql, params = conn.executed[0]
         assert params == (cutoff,)
         assert "2026" not in sql  # cutoff never string-formatted into SQL text
+
+
+def _sqlite_delete_sql(delete_sql: str, batch: Sequence[int]) -> str:
+    """Adapt a real `RetentionTable.delete_sql` (psycopg2 `%s` paramstyle,
+    `job_id = ANY(%s)` array membership) for execution against an in-memory
+    sqlite database: sqlite has no `ANY(array)` operator, so the batch
+    membership test is rewritten as an `IN (?, ?, ...)` list of the SAME
+    job_ids (identical semantics: "job_id is one of the candidate batch"),
+    and every remaining `%s` becomes sqlite's `?` placeholder. Everything
+    else in the SQL text -- in particular the age-predicate re-assertion
+    this module's N1 fix adds -- is left byte-for-byte untouched, so a
+    passing test proves that exact clause's behavior, not a paraphrase of
+    it (same convention as TestMonJdlsOrphanEligibility below)."""
+    placeholders = ",".join("?" for _ in batch)
+    sql = delete_sql.replace("job_id = ANY(%s)", f"job_id IN ({placeholders})", 1)
+    return sql.replace("%s", "?")
+
+
+class TestDeleteReassertsAgePredicateTOCTOU:
+    """N1 (review important): a row updated between the candidate-SELECT
+    and the DELETE -- e.g. a job "revives" (its age-predicate column
+    advances past the cutoff) in that window -- must survive the DELETE,
+    even though it was collected into the candidate batch. The pre-fix
+    `WHERE job_id = ANY(%s)` alone would delete it anyway, silently losing
+    whatever new data the revival ingested. Exercised against a real
+    in-memory sqlite database (not just asserted structurally) so the fix
+    is proven behaviorally, same convention as
+    TestMonJdlsOrphanEligibility."""
+
+    def test_revived_job_info_row_survives_the_delete(self):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute(
+            "INSERT INTO job_info (job_id, last_update) VALUES "
+            "(1, '2020-01-01'), (2, '2020-01-01')"
+        )
+        db.commit()
+
+        # Candidate SELECT already ran and returned job_id 1 and 2 as
+        # older than the '2026-01-01' cutoff.
+        candidate_batch = [1, 2]
+
+        # TOCTOU window: job_id=1 revives (last_update advances past the
+        # cutoff) strictly AFTER the SELECT but BEFORE the DELETE below.
+        db.execute("UPDATE job_info SET last_update = '2030-01-01' WHERE job_id = 1")
+        db.commit()
+
+        sql = _sqlite_delete_sql(JOB_INFO_TABLE.delete_sql, candidate_batch)
+        db.execute(sql, (*candidate_batch, "2026-01-01"))
+        db.commit()
+
+        remaining = {row[0] for row in db.execute("SELECT job_id FROM job_info").fetchall()}
+        assert remaining == {1}  # revived row survives
+        assert 2 not in remaining  # genuinely-old row still deleted
+
+    def test_non_revived_job_info_rows_are_deleted_normally(self):
+        # Baseline: without a TOCTOU revival, the re-asserted predicate
+        # must not accidentally exclude genuinely-old rows.
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute(
+            "INSERT INTO job_info (job_id, last_update) VALUES "
+            "(1, '2020-01-01'), (2, '2020-01-01')"
+        )
+        db.commit()
+        candidate_batch = [1, 2]
+
+        sql = _sqlite_delete_sql(JOB_INFO_TABLE.delete_sql, candidate_batch)
+        db.execute(sql, (*candidate_batch, "2026-01-01"))
+        db.commit()
+
+        remaining = {row[0] for row in db.execute("SELECT job_id FROM job_info").fetchall()}
+        assert remaining == set()
+
+    def test_revived_mon_jdls_parent_survives_the_delete(self):
+        # Same TOCTOU shape, but for mon_jdls's join-based re-assertion:
+        # the PARENT job_info row revives between SELECT and DELETE.
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        db.execute("INSERT INTO job_info (job_id, last_update) VALUES (1, '2020-01-01')")
+        db.execute("INSERT INTO mon_jdls (job_id) VALUES (1)")
+        db.commit()
+
+        candidate_batch = [1]  # collected while job_info(1).last_update was old
+
+        # TOCTOU: parent job_info(1) revives after SELECT, before DELETE.
+        db.execute("UPDATE job_info SET last_update = '2030-01-01' WHERE job_id = 1")
+        db.commit()
+
+        sql = _sqlite_delete_sql(MON_JDLS_TABLE.delete_sql, candidate_batch)
+        db.execute(sql, (*candidate_batch, "2026-01-01"))
+        db.commit()
+
+        remaining = {row[0] for row in db.execute("SELECT job_id FROM mon_jdls").fetchall()}
+        assert remaining == {1}  # survives -- parent revived
+
+    def test_genuinely_old_orphan_mon_jdls_row_is_still_deleted(self):
+        # Baseline positive case for the orphan branch of the re-assertion:
+        # a job_id with NO job_info parent at all, below the min surviving
+        # job_id (N2's bound), must still be deleted -- the re-assertion
+        # must not accidentally disable the orphan path entirely.
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        db.execute("INSERT INTO job_info (job_id, last_update) VALUES (100, '2030-01-01')")
+        db.execute("INSERT INTO mon_jdls (job_id) VALUES (1)")
+        db.commit()
+        candidate_batch = [1]
+
+        sql = _sqlite_delete_sql(MON_JDLS_TABLE.delete_sql, candidate_batch)
+        db.execute(sql, (*candidate_batch, "2026-01-01"))
+        db.commit()
+
+        remaining = {row[0] for row in db.execute("SELECT job_id FROM mon_jdls").fetchall()}
+        assert remaining == set()
+
+    def test_mon_jdls_row_whose_new_parent_appears_between_select_and_delete_survives(self):
+        # A stronger TOCTOU case, specific to the orphan path: at SELECT
+        # time job_id=150 had NO job_info parent at all (a true orphan
+        # candidate). Between SELECT and DELETE, its parent row FINALLY
+        # lands (ingestion catches up) with a fresh last_update -- the row
+        # is no longer an orphan and is no longer old, so it must survive.
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        db.execute("INSERT INTO mon_jdls (job_id) VALUES (150)")
+        db.commit()
+        candidate_batch = [150]  # collected as an orphan (no job_info row existed yet)
+
+        # TOCTOU: the parent row appears after SELECT, before DELETE.
+        db.execute("INSERT INTO job_info (job_id, last_update) VALUES (150, '2030-01-01')")
+        db.commit()
+
+        sql = _sqlite_delete_sql(MON_JDLS_TABLE.delete_sql, candidate_batch)
+        db.execute(sql, (*candidate_batch, "2026-01-01"))
+        db.commit()
+
+        remaining = {row[0] for row in db.execute("SELECT job_id FROM mon_jdls").fetchall()}
+        assert remaining == {150}  # survives -- no longer an orphan, not old
+
+
+class TestTraceDeleteReassertsAgePredicateTOCTOU:
+    """Same N1 behavioral proof for `trace`, adapted for sqlite: sqlite has
+    no `to_timestamp()` builtin, so a Python-callable UDF standing in for
+    Postgres's `to_timestamp(x / 1000.0)` is registered for this test only
+    (returns the same epoch-seconds float `to_timestamp` would represent as
+    a comparable value; the cutoff is supplied as the equivalent epoch-
+    seconds float rather than a `timestamptz` literal). The SQL text
+    exercised is otherwise IDENTICAL to `TRACE_TABLE.delete_sql` -- same
+    convention as `_sqlite_delete_sql` above."""
+
+    def test_revived_trace_row_survives_the_delete(self):
+        db = sqlite3.connect(":memory:")
+        db.create_function("to_timestamp", 1, lambda x: x)  # identity: already epoch seconds
+        db.execute("CREATE TABLE trace (job_id INTEGER, laststatuschangetimestamp INTEGER)")
+        # 1_700_000_000_000 ms == 1_700_000_000 s, well before the cutoff.
+        db.execute(
+            "INSERT INTO trace (job_id, laststatuschangetimestamp) VALUES "
+            "(1, 1700000000000), (2, 1700000000000)"
+        )
+        db.commit()
+        candidate_batch = [1, 2]
+
+        # TOCTOU: job_id=1 revives to a timestamp AFTER the cutoff, between
+        # SELECT and DELETE.
+        db.execute(
+            "UPDATE trace SET laststatuschangetimestamp = 1900000000000 WHERE job_id = 1"
+        )
+        db.commit()
+
+        sql = _sqlite_delete_sql(TRACE_TABLE.delete_sql, candidate_batch)
+        cutoff_epoch_seconds = 1_800_000_000.0  # between the two values above
+        db.execute(sql, (*candidate_batch, cutoff_epoch_seconds))
+        db.commit()
+
+        remaining = {row[0] for row in db.execute("SELECT job_id FROM trace").fetchall()}
+        assert remaining == {1}
+        assert 2 not in remaining
 
 
 class TestTableRegistry:
@@ -473,6 +705,72 @@ class TestMonJdlsOrphanEligibility:
         )
         rows = db.execute(pre_fix_inner_join_sql, ("2026-01-01",)).fetchall()
         assert {row[0] for row in rows} == {2}  # orphan (1) invisible -- the bug
+
+
+class TestMonJdlsOrphanEligibilityBounded:
+    """N2 (review important): the pre-fix `OR j.job_id IS NULL` escape
+    hatch made ANY orphaned mon_jdls row an instant candidate, including
+    one whose parent hasn't landed YET -- a brand-new mon_jdls row racing
+    ahead of its own job_info insert during normal ingestion looks
+    identical, at the SQL level, to a row whose parent was genuinely
+    retained away by an earlier run. Bound: an orphan is only eligible
+    when `m.job_id < (SELECT COALESCE(MIN(job_id), 0) FROM job_info)` --
+    parents truly retained away are always numerically below the oldest
+    surviving job_info row, since job_id is monotonically increasing in
+    the source system (pipeline.py's module docstring).
+
+    Same sqlite-execution convention as TestMonJdlsOrphanEligibility
+    above: the SQL string exercised is IDENTICAL to `MON_JDLS_TABLE.age_sql`
+    apart from the `%s` -> `?` paramstyle swap.
+    """
+
+    def test_new_orphan_above_the_min_survivor_is_not_a_candidate(self):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        # job_info's oldest surviving row is job_id=100 (older ones already
+        # retained by prior runs). mon_jdls job_id=150 has no job_info
+        # parent YET (e.g. still mid-ingest, parent insert hasn't landed)
+        # but 150 > MIN(job_id)=100 -- must NOT be retention-eligible.
+        db.execute("INSERT INTO job_info (job_id, last_update) VALUES (100, '2030-01-01')")
+        db.execute("INSERT INTO mon_jdls (job_id) VALUES (150)")
+        db.commit()
+
+        sqlite_sql = MON_JDLS_TABLE.age_sql.replace("%s", "?")
+        rows = db.execute(sqlite_sql, ("2026-01-01",)).fetchall()
+
+        assert {row[0] for row in rows} == set()
+
+    def test_old_orphan_below_the_min_survivor_is_a_candidate(self):
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        db.execute("INSERT INTO job_info (job_id, last_update) VALUES (100, '2030-01-01')")
+        db.execute("INSERT INTO mon_jdls (job_id) VALUES (50)")
+        db.commit()
+
+        sqlite_sql = MON_JDLS_TABLE.age_sql.replace("%s", "?")
+        rows = db.execute(sqlite_sql, ("2026-01-01",)).fetchall()
+
+        assert {row[0] for row in rows} == {50}
+
+    def test_empty_job_info_table_treats_the_minimum_as_zero_not_null(self):
+        # COALESCE(MIN(job_id), 0): an empty job_info table (e.g. right
+        # after a from-scratch reset) must not leave the bound as NULL,
+        # which would make `m.job_id < NULL` false for every row via SQL's
+        # three-valued logic -- COALESCE pins the floor at 0 instead, so
+        # nothing is spuriously treated as "below the minimum survivor"
+        # before job_info has any rows at all.
+        db = sqlite3.connect(":memory:")
+        db.execute("CREATE TABLE job_info (job_id INTEGER, last_update TEXT)")
+        db.execute("CREATE TABLE mon_jdls (job_id INTEGER)")
+        db.execute("INSERT INTO mon_jdls (job_id) VALUES (1)")
+        db.commit()
+
+        sqlite_sql = MON_JDLS_TABLE.age_sql.replace("%s", "?")
+        rows = db.execute(sqlite_sql, ("2026-01-01",)).fetchall()
+
+        assert {row[0] for row in rows} == set()
 
 
 class FakePlausibilityCursor:

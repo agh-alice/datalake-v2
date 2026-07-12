@@ -73,4 +73,21 @@ ingest:
     # snapshot accumulation across one day of nightly + sitesonar merges is
     # not large enough to need daily expiry (design D12).
     maintenance: "0 4 * * 0"
+  # Final-review N5: every CronWorkflow's workflowSpec gets an
+  # `activeDeadlineSeconds` ceiling -- a stuck pod (network partition on a
+  # PG/Lakekeeper/S3 call, a hung site-sonar HTTP fetch, etc.) previously
+  # had no upper bound at all and would run (and hold `concurrencyPolicy:
+  # Forbid`'s slot) indefinitely, silently blocking every subsequent
+  # scheduled tick. Defaults sized to each job's normal shape: nightly and
+  # sitesonar at 6h (21600s -- generous headroom over the ~1-2 min kind
+  # runs in task-*-report.md's acceptance timings, but bounded against a
+  # genuine hang; sitesonar's real cyfronet backlog is the larger of the
+  # two, per sitesonar.py's module docstring), maintenance at 1h (3600s --
+  # a single expire_snapshots() pass per table, no external HTTP fetch).
+  # Values-driven (not hardcoded in the template) so an environment can
+  # override per its own SLA without a chart change.
+  activeDeadlineSeconds:
+    nightly: 21600
+    sitesonar: 21600
+    maintenance: 3600
   retentionDays: "14"

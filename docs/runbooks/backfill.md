@@ -127,13 +127,23 @@ on scope:
   for this env-var hook, flag it if it comes up.
 
 Either way, **re-running over rows already in Iceberg is safe and
-idempotent**: every table uses `write_disposition={"disposition": "merge",
-"strategy": "upsert"}` on `primary_key="job_id"`. Verified live (Task 3):
-running the same ingest twice back to back produced identical row counts,
-identical distinct-`job_id` counts (no duplicates), and identical Iceberg
-snapshot IDs on the second run. A backfill window that overlaps
-already-ingested data merges cleanly -- it does not duplicate rows, and a
-window with zero actually-new/changed rows commits no new snapshot at all.
+idempotent for the three tables `run-nightly` touches**: `job_info`,
+`trace`, and `mon_jdls_parsed` all use `write_disposition=
+{"disposition": "merge", "strategy": "upsert"}` on `primary_key="job_id"`.
+Verified live (Task 3): running the same ingest twice back to back
+produced identical row counts, identical distinct-`job_id` counts (no
+duplicates), and identical Iceberg snapshot IDs on the second run. A
+backfill window that overlaps already-ingested data merges cleanly -- it
+does not duplicate rows, and a window with zero actually-new/changed rows
+commits no new snapshot at all.
+
+(This backfill mechanism does not apply to `site_sonar` in the first
+place -- `run-sitesonar` is a separate subcommand from `run-nightly`, has
+no `INGEST_INITIAL_*` override, and is append-only with its own
+file-level high-water mark, not merge/upsert; see `docs/runbooks/
+ingestion-pipeline.md` section 7 for its weaker crash-retry semantics
+-- final-review N4, correcting this section's prior blanket "every table"
+claim.)
 
 ## 4. After a backfill: watermark cleanup
 

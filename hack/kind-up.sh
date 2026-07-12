@@ -107,6 +107,17 @@ else
   PG_URL=$(kubectl -n landing-db get secret mon-data-app -o jsonpath='{.data.uri}' | base64 -d)
   S3_ACCESS_KEY=$(kubectl -n minio get secret minio-creds -o jsonpath='{.data.rootUser}' | base64 -d)
   S3_SECRET_KEY=$(kubectl -n minio get secret minio-creds -o jsonpath='{.data.rootPassword}' | base64 -d)
+  # SITESONAR_LIMIT (final-review N5-part): kind-only operational bound on
+  # alice_ingest.sitesonar's per-run file fetch count -- consumed by
+  # sitesonar.py's _resolve_limit() (falls back to this env var only when
+  # the --limit CLI flag isn't given, which is how the CronWorkflow always
+  # invokes run-sitesonar). Without it, every scheduled kind tick would
+  # attempt the REAL alimonitor.cern.ch backlog (1740+ files, tens of GB
+  # decompressed -- sitesonar.py's module docstring), which is neither
+  # needed nor practical for a kind dev/CI cluster. Cyfronet's real
+  # ExternalSecret-sourced ingest-env (chart/values-cyfronet.yaml's
+  # comment) deliberately has NO SITESONAR_LIMIT key -- production must
+  # run the real, unbounded backlog drain.
   kubectl -n argo-workflows create secret generic ingest-env \
     --from-literal=PG_URL="$PG_URL" \
     --from-literal=S3_ENDPOINT="http://minio.minio.svc:9000" \
@@ -116,7 +127,8 @@ else
     --from-literal=S3_REGION="local-01" \
     --from-literal=LAKEKEEPER_URI="http://lakekeeper.lakekeeper.svc:8181" \
     --from-literal=LAKEKEEPER_WAREHOUSE="default" \
-    --from-literal=RETENTION_DAYS="14"
+    --from-literal=RETENTION_DAYS="14" \
+    --from-literal=SITESONAR_LIMIT="5"
   echo "ingest-env secret created"
 fi
 echo "kind + ArgoCD (hydrator) + apps ready"

@@ -243,6 +243,21 @@ spec:
           if "jdl__lpmpassname" in cols:
               print("FAIL: split-casing column jdl__lpmpassname present (LPM casing merge regression)")
               sys.exit(1)
+          # Final-review N3: mon_jdls's JDL list fields (e.g. Packages) must
+          # land as VALUE columns, not spin off dlt child tables -- the ML
+          # consumer's data contract expects Packages as a column
+          # (pipeline.py's build_mon_jdls_resource(), max_table_nesting=1).
+          # Assert BOTH sides, same regression-proof shape as the LPM
+          # casing check above: the value column present, AND no child
+          # table of mon_jdls_parsed exists at all in the catalog.
+          if "jdl__packages" not in cols:
+              print("FAIL: missing jdl__packages value column (max_table_nesting regression)")
+              sys.exit(1)
+          alice_tables = [".".join(t) for t in catalog.list_tables("alice")]
+          child_tables = [t for t in alice_tables if t.startswith("alice.mon_jdls_parsed__")]
+          if child_tables:
+              print(f"FAIL: mon_jdls_parsed child table(s) present (max_table_nesting regression): {child_tables}")
+              sys.exit(1)
           print("iceberg-contents-probe: OK")
 PODYAML
 phase=""
@@ -255,7 +270,7 @@ PROBE_LOG=$(kubectl -n argo-workflows logs iceberg-contents-probe 2>/dev/null ||
 kubectl -n argo-workflows delete pod iceberg-contents-probe --ignore-not-found >/dev/null 2>&1
 echo "$PROBE_LOG"
 if [ "$phase" = "Succeeded" ] && echo "$PROBE_LOG" | grep -q "iceberg-contents-probe: OK"; then
-  echo "iceberg contents OK (job_info >=900 rows, mon_jdls_parsed jdl__lpm_pass_name present and jdl__lpmpassname absent)"
+  echo "iceberg contents OK (job_info >=900 rows, mon_jdls_parsed jdl__lpm_pass_name present and jdl__lpmpassname absent, jdl__packages column present and no mon_jdls_parsed__* child tables)"
 else
   echo "FAIL: iceberg-contents-probe phase=$phase"; exit 1
 fi

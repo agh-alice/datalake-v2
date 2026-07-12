@@ -83,6 +83,7 @@ Optional, with defaults:
 | `S3_REGION` | `local-01` | `pipeline.py`, `retention.py` (any non-empty string satisfies the S3 SDK; MinIO ignores it) |
 | `RETENTION_DAYS` | `14` (owner decision 2026-07-12) | `retention.py` |
 | `SITESONAR_URL` | `http://alimonitor.cern.ch/download/kalana/` | `sitesonar.py` |
+| `SITESONAR_LIMIT` | unset (no limit) | `sitesonar.py`'s `_resolve_limit()` (final-review N5-part) -- caps `run-sitesonar`'s per-run new-file fetch count, same effect as the pre-existing `--limit` CLI flag (which always wins if both are given). **kind-only**: `hack/kind-up.sh`'s `ingest-env` Secret sets `SITESONAR_LIMIT=5` so a scheduled kind tick never attempts the real ~1740-file alimonitor.cern.ch backlog. **Cyfronet deliberately leaves this unset** (`chart/values-cyfronet.yaml`'s `ingest-env` ExternalSecret example has no `SITESONAR_LIMIT` key) -- production must run the real, unbounded backlog drain. |
 | `MAINTENANCE_OLDER_THAN_DAYS` | `7` | `maintenance.py` (snapshot-expiry cutoff, distinct from `RETENTION_DAYS`) |
 
 Backfill overrides, all optional (Plan 2 Task 6; see `docs/runbooks/
@@ -312,15 +313,45 @@ absent` / `0 object(s)` if there's nothing left to wipe.
 
 ## 7. Idempotency guarantees
 
-Every table (`job_info`, `trace`, `mon_jdls_parsed`, `site_sonar`) uses
+**`job_info`, `trace`, and `mon_jdls_parsed`** use
 `write_disposition={"disposition": "merge", "strategy": "upsert"}` on
-`primary_key="job_id"` (site_sonar's own row-level cursor). A rerun over
-already-loaded data is a genuine no-op at the data level: verified live in
-Task 3 by running `hack/run-ingest-once.sh` twice back to back against the
-same fixture state -- identical row counts, identical distinct-job_id
-counts (no duplicates), and **identical Iceberg snapshot IDs** on the
-second run (dlt logs "0 load package(s) ... into dataset None" for a
-resource whose incremental cursor found nothing new, and a 0-row merge
-commits no new snapshot). This is what makes `docs/runbooks/backfill.md`'s
-bounded-window re-run procedure safe: re-running a window that overlaps
+`primary_key="job_id"`. A rerun over already-loaded data is a genuine
+no-op at the data level for these three: verified live in Task 3 by
+running `hack/run-ingest-once.sh` twice back to back against the same
+fixture state -- identical row counts, identical distinct-job_id counts
+(no duplicates), and **identical Iceberg snapshot IDs** on the second run
+(dlt logs "0 load package(s) ... into dataset None" for a resource whose
+incremental cursor found nothing new, and a 0-row merge commits no new
+snapshot). This is what makes `docs/runbooks/backfill.md`'s bounded-window
+re-run procedure safe for these tables: re-running a window that overlaps
 already-ingested data never duplicates or corrupts existing rows.
+
+**`site_sonar` is the one exception** (final-review N4 -- this section
+previously and incorrectly claimed "every table" uses merge/upsert;
+`sitesonar.py`'s `build_site_sonar_resource()` sets
+`write_disposition="append"`, not merge). Its idempotency guarantee is
+weaker and works differently:
+
+- Row-level: dlt's incremental cursor on `last_updated` makes a rerun over
+  the SAME already-fetched file idempotent in the ordinary case (the
+  cursor has already advanced past those rows, so a repeat pass over the
+  same file yields nothing new to append).
+- File-level: the real dedup mechanism is `sitesonar.py`'s high-water-mark
+  file skip (`select_files_to_fetch()`/`_iter_rows()`, this doc's section
+  1) -- once a `.out.xz` file's epoch is at or below the persisted
+  `high_water_mark`, the file is never re-downloaded or re-parsed at all
+  on a later run.
+- **Weaker crash-retry semantics than the merge/upsert tables**: because
+  the write disposition is `append`, not `merge`, a crash or restart
+  between an APPEND actually committing to Iceberg and the pipeline
+  successfully persisting its own updated `_dlt_pipeline_state` (section
+  4) can leave the high-water mark stale relative to what was actually
+  written. The NEXT run then re-fetches and re-appends the same file(s) --
+  genuine duplicate rows in `site_sonar`, not merged away, since there is
+  no upsert key deduplicating on rerun (unlike `job_info`/`trace`/
+  `mon_jdls_parsed`, where a duplicate re-ingest of the same `job_id`
+  silently upserts in place). This window is narrow (state persist happens
+  immediately after a successful `pipeline.run()` call) but real; a
+  consumer of `site_sonar` that cannot tolerate occasional duplicate
+  `(hostname, last_updated)` rows across a crash-retry boundary should
+  dedupe on read, not assume append-only means duplicate-free.

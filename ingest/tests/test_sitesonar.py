@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import lzma
 
+import pytest
+
 from alice_ingest.sitesonar import (
     _iter_rows,
     fetch_and_parse,
@@ -354,3 +356,95 @@ class TestIterRowsHighWaterMark:
         assert "high_water_mark=200" in out
         assert "files_already_processed_skipped=2" in out
         assert "files_to_fetch=0" in out
+
+
+class TestIterRowsPerFileProgressLogging:
+    """N5-part (final-review, minor): a long site-sonar backlog run (the
+    real cyfronet case -- 1740+ files, unbounded, module docstring) prints
+    nothing between the initial `SITESONAR ... files_to_fetch=N` summary
+    line and completion, giving an operator watching pod logs no signal of
+    progress for a run that can take a long time. One `n/total` progress
+    line per file fetched, interleaved with the actual fetch/yield loop."""
+
+    def test_logs_one_progress_line_per_file_with_running_count(self, capsys):
+        listing_url = BASE_URL
+        file_100 = f"{BASE_URL}site-sonar-100.out.xz"
+        file_200 = f"{BASE_URL}site-sonar-200.out.xz"
+        session = FakeMultiUrlSession(
+            {
+                listing_url: FakeResponse(_listing_html([100, 200]).encode()),
+                file_100: _file_response(100),
+                file_200: _file_response(200),
+            }
+        )
+        session._responses[listing_url].text = _listing_html([100, 200])
+
+        state: dict = {}
+        list(_iter_rows(BASE_URL, None, session, state))
+
+        out = capsys.readouterr().out
+        assert "SITESONAR file 1/2" in out
+        assert "SITESONAR file 2/2" in out
+
+    def test_progress_lines_respect_the_limit_not_the_full_listing(self, capsys):
+        listing_url = BASE_URL
+        file_300 = f"{BASE_URL}site-sonar-300.out.xz"
+        session = FakeMultiUrlSession(
+            {listing_url: FakeResponse(b""), file_300: _file_response(300)}
+        )
+        session._responses[listing_url].text = _listing_html([300, 250, 200])
+
+        state = {"high_water_mark": 200}
+        list(_iter_rows(BASE_URL, limit=1, session=session, state=state))
+
+        out = capsys.readouterr().out
+        assert "SITESONAR file 1/1" in out
+        assert "2/2" not in out  # only the one limited file, not both new ones
+
+    def test_no_progress_lines_when_nothing_new_to_fetch(self, capsys):
+        listing_url = BASE_URL
+        session = FakeMultiUrlSession({listing_url: FakeResponse(b"")})
+        session._responses[listing_url].text = _listing_html([100, 200])
+
+        state = {"high_water_mark": 200}
+        list(_iter_rows(BASE_URL, None, session, state))
+
+        out = capsys.readouterr().out
+        assert "SITESONAR file" not in out
+
+
+# ---------------------------------------------------------------------------
+# SITESONAR_LIMIT env var (final-review N5-part): unifies with the
+# pre-existing --limit CLI flag -- --limit always wins when given
+# explicitly; SITESONAR_LIMIT is the fallback (kind sets it via the
+# ingest-env Secret to bound nightly site-sonar runs on the small kind
+# cluster; cyfronet leaves it unset for the real, unbounded backlog).
+# ---------------------------------------------------------------------------
+
+
+class TestResolveLimit:
+    def test_explicit_cli_limit_wins_over_env(self):
+        from alice_ingest.sitesonar import _resolve_limit
+
+        assert _resolve_limit(5, {"SITESONAR_LIMIT": "1"}) == 5
+
+    def test_falls_back_to_env_var_when_cli_limit_is_none(self):
+        from alice_ingest.sitesonar import _resolve_limit
+
+        assert _resolve_limit(None, {"SITESONAR_LIMIT": "5"}) == 5
+
+    def test_none_when_neither_cli_nor_env_set(self):
+        from alice_ingest.sitesonar import _resolve_limit
+
+        assert _resolve_limit(None, {}) is None
+
+    def test_none_when_env_var_is_empty_string(self):
+        from alice_ingest.sitesonar import _resolve_limit
+
+        assert _resolve_limit(None, {"SITESONAR_LIMIT": ""}) is None
+
+    def test_rejects_non_integer_env_value(self):
+        from alice_ingest.sitesonar import _resolve_limit
+
+        with pytest.raises(SystemExit, match="SITESONAR_LIMIT"):
+            _resolve_limit(None, {"SITESONAR_LIMIT": "not-an-int"})

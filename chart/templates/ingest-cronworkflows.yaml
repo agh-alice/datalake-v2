@@ -20,6 +20,11 @@ spec:
     serviceAccountName: pipeline-runner
     entrypoint: main
     ttlStrategy: {secondsAfterCompletion: 86400}
+    # Final-review N5: a stuck run-nightly/run-retention pod previously had
+    # no upper bound and would hold concurrencyPolicy: Forbid's slot
+    # indefinitely, blocking every later scheduled tick -- see
+    # chart/values.yaml's ingest.activeDeadlineSeconds comment.
+    activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds.nightly }}
     templates:
       # 2-step DAG: run-retention only starts once run-nightly has
       # Succeeded (brief: "retention only after successful ingest -- hard
@@ -61,6 +66,10 @@ spec:
     serviceAccountName: pipeline-runner
     entrypoint: main
     ttlStrategy: {secondsAfterCompletion: 86400}
+    # Final-review N5 -- see ingest-nightly's activeDeadlineSeconds comment
+    # above; sitesonar's unbounded real-cyfronet backlog (sitesonar.py's
+    # module docstring) makes a hang here at least as plausible as nightly.
+    activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds.sitesonar }}
     templates:
       - name: main
         container:
@@ -89,6 +98,10 @@ spec:
     serviceAccountName: pipeline-runner
     entrypoint: main
     ttlStrategy: {secondsAfterCompletion: 86400}
+    # Final-review N5 -- see ingest-nightly's activeDeadlineSeconds comment
+    # above. Shorter default (1h) than nightly/sitesonar: a single
+    # expire_snapshots() pass per alice.* table, no external HTTP fetch.
+    activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds.maintenance }}
     templates:
       - name: main
         container:
