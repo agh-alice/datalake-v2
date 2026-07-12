@@ -6,6 +6,18 @@ commitServer:
   enabled: true
 dex:
   enabled: false
+# Execution-time deviation (Task 6 review finding, 2026-07-12): the ArgoAppOutOfSync
+# alert (Task 6 / design D11) depends on argocd_app_info, which the application
+# controller only exports once metrics are enabled -- Task 2's bootstrap never turned
+# this on, so the alert was dead on arrival (loaded but could never fire). Enabling the
+# metrics endpoint here; the chart's built-in serviceMonitor is intentionally NOT
+# enabled -- on a clean-room kind-up ArgoCD installs before the Prometheus-operator
+# CRDs exist (Task 2 sync-wave ordering), so a serviceMonitor: {enabled: true} here
+# would fail to render/apply. The ServiceMonitor lives in chart/templates instead,
+# where it hydrates after kube-prometheus-stack.
+controller:
+  metrics:
+    enabled: true
 # --- Execution-time deviation (Task 2, Steps 1-2, 2026-07-12) ---
 # Chart argo/argo-cd 10.1.3 is the newest published chart at execution time, but it
 # bundles appVersion v3.4.5 (Source Hydrator = alpha). ArgoCD v3.5.0 (Source Hydrator

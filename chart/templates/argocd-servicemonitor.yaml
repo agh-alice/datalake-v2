@@ -1,0 +1,31 @@
+# Task 6 review finding: ArgoAppOutOfSync (datalake-alerts.yaml) depends on
+# argocd_app_info, which only exists once the application controller's metrics
+# endpoint is scraped. environments/kind/argocd-values.yaml turns the endpoint on
+# (controller.metrics.enabled: true) but deliberately skips the argo-cd chart's own
+# serviceMonitor.enabled -- on a clean-room kind-up, ArgoCD (sync-wave -- installed
+# by hack/kind-up.sh before apps/) is live before the kube-prometheus-stack CRDs
+# exist, so a serviceMonitor rendered by the argo-cd chart at that point would fail.
+# This chart hydrates after kube-prometheus-stack (monitoring Application, sync-wave
+# "1"), so the CRD is guaranteed to exist by the time this renders/applies.
+#
+# Targets Service argocd-application-controller-metrics (ns argocd), created live by
+# the argo-cd chart once controller.metrics.enabled is set -- verified post-upgrade:
+#   kubectl -n argocd get svc argocd-application-controller-metrics -o yaml
+# labels: app.kubernetes.io/name=argocd-metrics, app.kubernetes.io/component=application-controller
+# port: name "http-metrics", 8082/TCP.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: argocd-application-controller
+  namespace: monitoring
+spec:
+  namespaceSelector:
+    matchNames:
+      - argocd
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: argocd-metrics
+      app.kubernetes.io/component: application-controller
+  endpoints:
+    - port: http-metrics
+      interval: 30s

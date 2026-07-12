@@ -25,19 +25,58 @@ spec:
             incident: E4
             runbook_url: docs/runbooks/xid-wraparound.md
 
+        # Task 6 review finding: cnpg_pg_replication_streaming_replicas is reported
+        # per-pod (each pod's own count of replicas streaming *from* it), not
+        # per-cluster. A cascading-free CNPG cluster's replica pods always report 0
+        # (nothing streams downstream of a replica) and a single-instance cluster has
+        # no replicas by design -- the original `< 1` expr fired on every healthy
+        # replica pod and on kind's deliberately single-instance mon-data. Fixed by
+        # taking the max across each cluster's pods (the primary's count is the
+        # cluster's true streaming-replica count) and comparing against a
+        # values-driven threshold (instances - 1), rendered only when the cluster is
+        # actually configured for HA (instances > 1) -- on kind, landingDb.instances
+        # is 1 (values-kind.yaml), so this block is intentionally absent for mon-data.
+        #
+        # Deviation from plan: cnpg_pg_replication_streaming_replicas carries no
+        # `cluster` label (verified live via Prometheus /api/v1/series -- only
+        # container/endpoint/instance/job/namespace/pod are present; `job` is
+        # "<namespace>/<cluster>" and only cnpg_collector_up, a different metric,
+        # carries a `cluster` label). Each CNPG Cluster in this chart lives in its
+        # own dedicated namespace (lakekeeper-db.yaml -> ns lakekeeper, landing-db.yaml
+        # -> ns landing-db; chart/templates/namespaces.yaml), so `namespace` uniquely
+        # identifies the cluster and is used as the grouping/matching label instead.
+        {{- if gt (int .Values.landingDb.instances) 1 }}
         - alert: CNPGClusterUnhealthy
-          expr: cnpg_pg_replication_streaming_replicas < 1
+          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="landing-db"}) < {{ sub (int .Values.landingDb.instances) 1 }}
           for: 15m
           labels:
             severity: critical
           annotations:
-            summary: CNPG cluster has no streaming replicas
+            summary: CNPG cluster mon-data has fewer streaming replicas than expected
             description: >-
-              cnpg_pg_replication_streaming_replicas has been below 1 for
-              15m -- HA is degraded to a single instance. E5 was the
-              RAID0-over-4-volumes VM with zero redundancy that CNPG
-              replaces.
+              cnpg_pg_replication_streaming_replicas (max across mon-data's pods,
+              i.e. the primary's view) has been below
+              {{ sub (int .Values.landingDb.instances) 1 }} for 15m -- HA is
+              degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy
+              that CNPG replaces.
             incident: E5
+        {{- end }}
+        {{- if gt (int .Values.lakekeeperDb.instances) 1 }}
+        - alert: CNPGClusterUnhealthy
+          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="lakekeeper"}) < {{ sub (int .Values.lakekeeperDb.instances) 1 }}
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: CNPG cluster lakekeeper-db has fewer streaming replicas than expected
+            description: >-
+              cnpg_pg_replication_streaming_replicas (max across lakekeeper-db's
+              pods, i.e. the primary's view) has been below
+              {{ sub (int .Values.lakekeeperDb.instances) 1 }} for 15m -- HA is
+              degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy
+              that CNPG replaces.
+            incident: E5
+        {{- end }}
 
         - alert: NodeDiskPressure
           expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.2
