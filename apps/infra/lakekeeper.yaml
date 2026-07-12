@@ -33,9 +33,10 @@ spec:
         # secret store, distinct from the catalog DB above). It needs an
         # encryption key; the chart auto-generates one via helm `lookup`,
         # which is incompatible with ArgoCD (chart's own values.yaml warns of
-        # this, citing argoproj/argo-cd#5202). We pre-create the Secret
-        # ourselves in chart/templates/lakekeeper-pg-encryption.yaml
-        # (inline value for kind only; cyfronet uses an ExternalSecret).
+        # this, citing argoproj/argo-cd#5202). Secret lakekeeper/lakekeeper-pg-
+        # encryption is provisioned out-of-band -- by hack/kind-up.sh (random,
+        # throwaway) on kind, by ExternalSecret on cyfronet -- and referenced
+        # here only by name/key; it is never templated in this chart.
         secretBackend:
           postgres:
             encryptionKeySecret: lakekeeper-pg-encryption

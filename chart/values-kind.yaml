@@ -1,5 +1,1 @@
 # environment: kind — overrides land here as components arrive
-
-# kind-only, not a secret: see chart/values.yaml for why this must be a
-# pre-created Secret rather than the upstream chart's auto-generated one.
-lakekeeperPgEncryptionKey: "kind-only-not-a-secret"

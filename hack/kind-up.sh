@@ -29,6 +29,13 @@ kubectl -n argocd create secret generic datalake-v2-repo-write \
   --from-literal=password="$GH_TOKEN" \
   --dry-run=client -o yaml | kubectl apply -f -
 kubectl -n argocd label secret datalake-v2-repo-write argocd.argoproj.io/secret-type=repository-write --overwrite
+# Lakekeeper secret-store encryption key: harness-generated throwaway, random per
+# kind cluster (never in Git; cyfronet gets it via ExternalSecret). Namespace may
+# not exist yet (hydrator creates it later) — pre-create idempotently; SSA adopts it.
+kubectl create namespace lakekeeper --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n lakekeeper get secret lakekeeper-pg-encryption >/dev/null 2>&1 || \
+  kubectl -n lakekeeper create secret generic lakekeeper-pg-encryption \
+    --from-literal=encryptionKey="$(openssl rand -hex 32)"
 kubectl apply -f apps/project.yaml
 [ -d apps/infra ] && ls apps/infra/*.yaml >/dev/null 2>&1 && kubectl apply -f apps/infra/
 kubectl apply -f environments/kind/apps/

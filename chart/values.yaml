@@ -11,11 +11,9 @@ lakekeeperDb:
   storageSize: 5Gi
   enablePodMonitor: false   # true in Task 6
 
-# Lakekeeper's secretBackend.type=Postgres requires an encryption key for
-# secrets it stores in Postgres. The upstream chart's own value auto-generates
-# one via helm's `lookup`, which ArgoCD's client-side `helm template` render
-# does not support (see chart values.yaml comment, referencing
-# argoproj/argo-cd#5202) -- so we must supply a pre-created Secret ourselves.
-# kind: inline placeholder (not a secret). cyfronet: sourced via ExternalSecret,
-# set this to "" here so chart/templates/lakekeeper-pg-encryption.yaml is skipped.
-lakekeeperPgEncryptionKey: ""
+# Lakekeeper's Postgres secret-store encryption key lives in Secret
+# lakekeeper/lakekeeper-pg-encryption -- created by hack/kind-up.sh on kind
+# (random per cluster) and by ExternalSecret on cyfronet. Never templated in
+# this chart (no-secrets-in-rendered-branches constraint; upstream
+# auto-generation relies on helm lookup which ArgoCD render does not support,
+# argoproj/argo-cd#5202).
