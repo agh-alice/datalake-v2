@@ -15,11 +15,11 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29206122224
-# (commit e059924, ingest-image workflow, Plan 2 FINAL-review wave
-# follow-up: fixes mon_jdls's delete-ordering bug found live while
-# verifying N3 against the a697e5c pin -- see _DELETE_ORDER in
-# retention.py; the prior pin [sha256:6aa4c263...] predates it); verified
+# reviewable in the rendered-branch diff. Pinned from CI run 29213645823
+# (commit 24af764, ingest-image workflow, Plan 3 Task 2 review-fix wave:
+# apply-views drift detection + --strict gate + contract_columns.py
+# regeneration procedure -- see views.py's module docstring, "Drift
+# detection"; the prior pin [sha256:131fc3e9...] predates it); verified
 # resolvable via the GHCR registry API (`GET /v2/agh-alice/datalake-v2-
 # ingest/manifests/<digest>` with an anonymous pull token, HTTP 200) --
 # same index-manifest structure as the previous pin. Consumed by
@@ -27,7 +27,7 @@ namespaces:
 # Task 5 maintenance).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:131fc3e9d6823c6e82e57e6b8008c0baa764a01f6a012afe9a8c6399c3e1f20e"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:62ddcc44ee0f276344f0467a27fceb3c803a119585976415a20fbca1a483d8af"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
