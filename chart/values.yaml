@@ -15,17 +15,17 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29195263623
-# (commit 5c56e1e, ingest-image workflow, rebuild after the review-fix
-# commit: LPM casing merge at ingestion + production-parity watermarks/
-# fixture); verified resolvable via the GHCR registry API (`GET /v2/agh-
+# reviewable in the rendered-branch diff. Pinned from CI run 29196603972
+# (commit 5155ccf, ingest-image workflow, rebuild for Plan 2 Task 4:
+# retention.py + sitesonar.py + the ingest-cronworkflows.yaml chart
+# template); verified resolvable via the GHCR registry API (`GET /v2/agh-
 # alice/datalake-v2-ingest/manifests/<digest>` with an anonymous pull
 # token) -- an index manifest wrapping the linux/amd64 image + its
-# attestation manifest, matching the previous pin's structure.
-# Not yet consumed by a chart template (CronWorkflows land in Task 4).
+# attestation manifest, matching the previous pin's structure. Now consumed
+# by chart/templates/ingest-cronworkflows.yaml (Task 4).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:7f7f789c18db54393845c246606fd3c126a85795b7ffe46632fd0194d40ed891"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:26d95243d4d79246215ea71bfd37e25a2b905b53e0817f9b9d30fcff30927ed8"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
