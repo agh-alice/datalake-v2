@@ -438,7 +438,10 @@ def run_maintenance(env: Mapping[str, str] | None = None) -> int:
     return _run(env)
 
 
-def run_apply_views(env: Mapping[str, str] | None = None) -> int:
+def run_apply_views(env: Mapping[str, str] | None = None, strict: bool = False) -> int:
+    """`strict=True` (CLI: `alice-ingest apply-views --strict`) is forwarded
+    to `views.run()`'s drift-detection gate (views.py's module docstring,
+    "Drift detection" -- Plan 4's cutover runs `apply-views --strict`)."""
     env = env if env is not None else os.environ
     try:
         from alice_ingest.views import run as _run
@@ -449,7 +452,7 @@ def run_apply_views(env: Mapping[str, str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    return _run(env)
+    return _run(env, strict=strict)
 
 
 _COMMANDS = {
@@ -474,9 +477,21 @@ def main(argv: list[str] | None = None) -> int:
             "`alice-ingest run-sitesonar --limit 1`). Ignored by other commands."
         ),
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "apply-views only: exit 2 if live jdl__ columns with no contract "
+            "mapping are found (drift -- views.py's module docstring, "
+            "'Drift detection') instead of only warning. Ignored by other "
+            "commands. Plan 4's cutover gate: `apply-views --strict`."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.command == "run-sitesonar":
         return run_sitesonar(limit=args.limit)
+    if args.command == "apply-views":
+        return run_apply_views(strict=args.strict)
     return _COMMANDS[args.command]()
 
 

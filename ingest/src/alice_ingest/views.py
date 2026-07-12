@@ -63,10 +63,61 @@ branching on "does this one actually need it". A `None` mapping value
 renders as `CAST(NULL AS <null_type>) AS "<ContractName>"` with an inline
 `--` comment (no live dlt counterpart); trailing `passthrough` columns are
 appended, unaliased, under their own (already-valid) dlt names.
+
+Drift detection (review fix -- "the silent-NULL trap")
+--------------------------------------------------------------------------
+`contract_columns.py` is a STATIC mapping, generated once against the kind
+fixture's live schema (2026-07-12): only 12 of `mon_jdls_parsed`'s 66 JDL
+contract fields have a live `jdl__*` counterpart today, so 54 render as
+typed NULLs. At Plan-4 cutover, dlt's `schema_contract={"columns": "evolve",
+...}` (pipeline.py) will let production JDLs grow NEW `jdl__*` columns that
+this static mapping has never seen. Without detection, `lake.contract.
+mon_jdls_parsed` would keep silently serving a typed NULL for a field whose
+real, live data has started arriving on `lake.alice.mon_jdls_parsed` right
+next to it -- wrong, and silent.
+
+`check_table_drift()`/`check_drift()` run `SHOW COLUMNS FROM lake.alice.
+<table>` (the SOURCE table apply_views() selects FROM, not the contract
+VIEW -- the view's own column set is fixed by construction and would never
+show drift against itself) and diff the live column names against
+everything this module already accounts for: every mapped `dlt_name` in
+`TABLE_SPECS[table].columns`, that table's `passthrough` tuple,
+`DLT_METADATA_COLUMNS` (`_dlt_load_id`/`_dlt_id` -- checked independently of
+any one table's passthrough tuple, so tables with an empty passthrough
+today, like job_info/trace, still get a correct baseline), and
+`KNOWN_NON_CONTRACT_HELPERS` (`jdl_parse_ok`/`full_jdl_raw`/`full_jdl` --
+`parse_jdl`/pipeline bookkeeping columns, same reasoning). Anything left
+over is classified by name: a live `jdl__*` column is ACTIONABLE drift
+(contract_columns.py needs regenerating -- real base data exists with no
+contract mapping to surface it); anything else is informational only, e.g.
+some future dlt-internal helper column that was never going to be a
+contract field regardless (brief: "never strict-fails").
+
+`run()` calls `check_drift()` once, after `apply_views()` has applied all
+three views, and prints one line per table with actionable drift:
+`WARNING: unmapped jdl__ columns present live in lake.alice.<table>
+(contract regeneration needed): [name:type, ...]` to stderr -- INCLUDING
+each column's live TYPE (so a future non-varchar arrival, e.g. `bigint`
+where every column mapped today is `varchar`, is visible without a second
+query). Informational-only columns print as `INFO: ...` to stderr and never
+affect the exit code. On kind today this prints nothing: the fixture's 12
+live `jdl__*` columns are all mapped, so `check_drift()` finds zero
+actionable drift on any of the three tables -- the warning path only fires
+on real drift (verified live, this task).
+
+`--strict` (CLI: `alice-ingest apply-views --strict`, wired through
+pipeline.py's argparse, `run(env, strict=True)` here): identical detection,
+but any actionable jdl__ drift makes `run()` return exit code 2 instead of
+0. Plan 4's cutover will run `apply-views --strict` as its gate -- a fresh
+production JDL vocabulary silently NULL-ing a real field must block the
+cutover, not just log a warning nobody reads. Non-strict `apply-views` (the
+default, and everything before Plan 4) never fails the process over drift;
+it only reports it.
 """
 
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -226,10 +277,109 @@ def apply_views(client: TrinoClient) -> list[str]:
     return executed
 
 
-def run(env: Mapping[str, str]) -> int:
+# --------------------------------------------------------------------------
+# Drift detection (module docstring, "Drift detection -- the silent-NULL
+# trap"). Diffs `SHOW COLUMNS FROM lake.alice.<table>` against everything
+# TABLE_SPECS already accounts for; a live `jdl__*` column left over is
+# actionable drift, anything else is informational only.
+# --------------------------------------------------------------------------
+
+# dlt's own per-load metadata columns -- checked independently of any one
+# table's `passthrough` tuple so job_info/trace (empty passthrough today)
+# still get a correct baseline if either ever grows these.
+DLT_METADATA_COLUMNS: tuple[str, ...] = ("_dlt_load_id", "_dlt_id")
+
+# Non-contract pipeline/parser bookkeeping columns that legitimately live on
+# `lake.alice.*` tables without ever belonging in the ML consumer's dtypes
+# contract (contract_columns.py's MON_JDLS_PARSED_PASSTHROUGH comment).
+# Listed again here, independent of any one table's passthrough tuple, for
+# the same reason as DLT_METADATA_COLUMNS above.
+KNOWN_NON_CONTRACT_HELPERS: tuple[str, ...] = ("jdl_parse_ok", "full_jdl_raw", "full_jdl")
+
+
+@dataclass(frozen=True)
+class DriftResult:
+    """One table's `SHOW COLUMNS FROM lake.alice.<table>` diffed against
+    everything this module currently accounts for. `unmapped_jdl_columns` is
+    the actionable one (contract_columns.py needs regenerating);
+    `other_unmapped_columns` is informational only -- never causes
+    `--strict` to fail (module docstring)."""
+
+    table: str
+    unmapped_jdl_columns: tuple[tuple[str, str], ...] = ()
+    other_unmapped_columns: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def has_jdl_drift(self) -> bool:
+        return bool(self.unmapped_jdl_columns)
+
+
+def _known_live_columns(spec: _TableSpec) -> set[str]:
+    mapped = {dlt_name for dlt_name in spec.columns.values() if dlt_name is not None}
+    return mapped | set(spec.passthrough) | set(DLT_METADATA_COLUMNS) | set(KNOWN_NON_CONTRACT_HELPERS)
+
+
+def check_table_drift(client: Any, table: str, spec: _TableSpec) -> DriftResult:
+    """Runs `SHOW COLUMNS FROM lake.alice.<table>` (the SOURCE table, not
+    the contract view -- module docstring) and classifies every live column
+    not already accounted for by `spec`: a `jdl__*` name is actionable
+    drift, anything else is informational only."""
+    rows = client.run(f"SHOW COLUMNS FROM {CATALOG}.{SOURCE_SCHEMA}.{table}")
+    known = _known_live_columns(spec)
+    unmapped_jdl: list[tuple[str, str]] = []
+    other_unmapped: list[tuple[str, str]] = []
+    for row in rows:
+        name, col_type = row[0], row[1]
+        if name in known:
+            continue
+        (unmapped_jdl if name.startswith("jdl__") else other_unmapped).append((name, col_type))
+    return DriftResult(
+        table=table,
+        unmapped_jdl_columns=tuple(unmapped_jdl),
+        other_unmapped_columns=tuple(other_unmapped),
+    )
+
+
+def check_drift(client: Any) -> list[DriftResult]:
+    """One `DriftResult` per `TABLE_SPECS` entry, in declaration order."""
+    return [check_table_drift(client, table, spec) for table, spec in TABLE_SPECS.items()]
+
+
+def _report_drift(results: list[DriftResult]) -> bool:
+    """Prints a `WARNING`/`INFO` line per table with unmapped live columns
+    (module docstring's exact message shape) to stderr. Returns True iff any
+    table has actionable jdl__ drift -- the only condition `--strict` acts
+    on."""
+    any_jdl_drift = False
+    for result in results:
+        if result.unmapped_jdl_columns:
+            any_jdl_drift = True
+            cols = ", ".join(f"{name}:{col_type}" for name, col_type in result.unmapped_jdl_columns)
+            print(
+                f"WARNING: unmapped jdl__ columns present live in "
+                f"{CATALOG}.{SOURCE_SCHEMA}.{result.table} (contract regeneration "
+                f"needed): [{cols}]",
+                file=sys.stderr,
+            )
+        if result.other_unmapped_columns:
+            cols = ", ".join(f"{name}:{col_type}" for name, col_type in result.other_unmapped_columns)
+            print(
+                f"INFO: unmapped non-jdl__ column(s) present live in "
+                f"{CATALOG}.{SOURCE_SCHEMA}.{result.table} (not contract drift, "
+                f"no action needed): [{cols}]",
+                file=sys.stderr,
+            )
+    return any_jdl_drift
+
+
+def run(env: Mapping[str, str], strict: bool = False) -> int:
     """Entry point wired from pipeline.py's `apply-views` CLI command
     (env-var contract: TRINO_URI, e.g. `http://trino.trino.svc:8080`,
-    added to `ingest-env` by hack/kind-up.sh)."""
+    added to `ingest-env` by hack/kind-up.sh).
+
+    `strict=True` (CLI: `apply-views --strict`) turns actionable jdl__
+    drift (module docstring, "Drift detection") into exit code 2 instead of
+    a warning -- the Plan 4 cutover gate."""
     trino_uri = env.get("TRINO_URI")
     if not trino_uri:
         raise SystemExit("alice-ingest: required env var TRINO_URI is not set")
@@ -239,4 +389,8 @@ def run(env: Mapping[str, str]) -> int:
     for table in TABLE_SPECS:
         print(f"CONTRACT VIEW applied: {CATALOG}.{CONTRACT_SCHEMA}.{table}")
     print(f"apply-views: {len(executed)} view(s) applied")
+
+    any_jdl_drift = _report_drift(check_drift(client))
+    if strict and any_jdl_drift:
+        return 2
     return 0

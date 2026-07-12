@@ -91,6 +91,53 @@ type-consistency lie this module has no live evidence for. The ML consumer's
 own `data_loader.py` already owns dtype casting against the contract
 (research/2026-07-12_ml-consumer-data-contract.md) -- that responsibility is
 not duplicated here.
+
+How to regenerate this mapping
+--------------------------------------------------------------------------
+This module is a STATIC snapshot, not computed at import/run time (module
+docstring, line 1). It goes stale the moment dlt evolves a new `jdl__*`
+column from production JDL data that this file has never seen -- exactly
+the drift `views.py`'s `check_drift()`/`apply-views --strict` detects (see
+that module's docstring, "Drift detection"). When `apply-views` (non-strict)
+prints a `WARNING: unmapped jdl__ columns present live ... (contract
+regeneration needed)` line, or `apply-views --strict` exits 2 with the same
+message, regenerate this file:
+
+  1. Re-fetch the upstream dtypes contract (source 1 above): `gh api
+     repos/agh-alice/alice_jobs_package/contents/src/alice_jobs_package/
+     resources/dtypes/{job_info,trace,mon_jdls_parsed}.json` -- confirm the
+     67-key `mon_jdls_parsed` shape (`job_id` + 66 JDL fields) hasn't itself
+     changed; if it has, `MON_JDLS_PARSED_COLUMNS`'s key set changes too,
+     not just its values.
+  2. Re-run `SHOW COLUMNS FROM lake.alice.<table>` live (via a Trino probe
+     pod/port-forward, same protocol `views.TrinoClient` implements) for all
+     three tables -- this is the actual trigger: the WARNING/exit-2 message
+     already names exactly which new `jdl__*` column(s) appeared and their
+     live type.
+  3. For each newly-live `jdl__*` column, find its contract field: run dlt's
+     real naming convention (NOT hand-simulated -- this module's earlier
+     verification note above), `dlt.common.normalizers.naming.snake_case.
+     NamingConvention().normalize_identifier()`, against the dtypes.json
+     field names from step 1, and match against the new live column name.
+     Apply the same LPM-casing rule (canonical `LPMPassName`, never the
+     legacy split-casing `LPMPASSNAME`) if relevant.
+  4. Update `MON_JDLS_PARSED_COLUMNS` (flip the matched field's value from
+     `None` to its live `jdl__*` name) -- or `JOB_INFO_COLUMNS`/
+     `TRACE_COLUMNS`/the relevant `*_PASSTHROUGH` tuple if the drift is on
+     one of those tables instead. If the new live column has NO contract
+     counterpart at all (an `other_unmapped_columns` / `INFO`-level result,
+     not `WARNING`), add it to that table's `*_PASSTHROUGH` tuple instead of
+     leaving it unmapped and unexplained.
+  5. Run `alice-ingest apply-views --strict` again -- exit 0 with no
+     WARNING/stderr output confirms the regeneration closed the gap
+     `check_drift()` found. (On kind: rebuild+push the ingest image first,
+     per this repo's normal `chore: pin ingest image digest` flow, since the
+     cluster runs the pinned image, not this working tree.)
+  6. Update this module's test companion, `ingest/tests/test_views.py`'s
+     `TestContractColumnsInvariants` (mapped/nulled counts, any new
+     column-specific invariant) -- the counts in this docstring (`13
+     mapped`, `54 NULLed`) and in those tests will both be stale after any
+     regeneration and must move together.
 """
 
 from __future__ import annotations

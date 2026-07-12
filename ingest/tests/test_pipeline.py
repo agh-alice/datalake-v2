@@ -26,6 +26,8 @@ docs/runbooks/backfill.md for the reusable manual procedure.
 
 from __future__ import annotations
 
+import sys
+
 import pendulum
 import pytest
 
@@ -252,3 +254,62 @@ class TestMaxTableNestingSuppressesChildTables:
         cols = tables["mon_jdls_parsed"]["columns"]
         assert "jdl__ttl" in cols
         assert "jdl__lpm_pass_name" in cols
+
+
+class TestApplyViewsStrictFlagWiring:
+    """`alice-ingest apply-views --strict` (review fix, drift detection --
+    views.py's module docstring): the CLI's `--strict` flag must reach
+    `views.run(env, strict=True)`. `--strict` is a global optional flag
+    (same shape as `--limit`, main()'s existing "ignored by other commands"
+    pattern) so it parses regardless of which command precedes it; only
+    `apply-views` reads it."""
+
+    def test_strict_flag_reaches_run_apply_views(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        captured = {}
+
+        def fake_run_apply_views(strict=False):
+            captured["strict"] = strict
+            return 0
+
+        monkeypatch.setattr(pipeline_module, "run_apply_views", fake_run_apply_views)
+
+        exit_code = pipeline_module.main(["apply-views", "--strict"])
+
+        assert exit_code == 0
+        assert captured["strict"] is True
+
+    def test_strict_defaults_to_false_when_flag_omitted(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        captured = {}
+
+        def fake_run_apply_views(strict=False):
+            captured["strict"] = strict
+            return 0
+
+        monkeypatch.setattr(pipeline_module, "run_apply_views", fake_run_apply_views)
+
+        exit_code = pipeline_module.main(["apply-views"])
+
+        assert exit_code == 0
+        assert captured["strict"] is False
+
+    def test_run_apply_views_forwards_strict_to_views_run(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        captured = {}
+
+        class FakeViewsModule:
+            @staticmethod
+            def run(env, strict=False):
+                captured["strict"] = strict
+                return 0
+
+        monkeypatch.setitem(sys.modules, "alice_ingest.views", FakeViewsModule)
+
+        exit_code = pipeline_module.run_apply_views(env={}, strict=True)
+
+        assert exit_code == 0
+        assert captured["strict"] is True

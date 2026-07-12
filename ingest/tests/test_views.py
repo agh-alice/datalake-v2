@@ -417,3 +417,229 @@ class TestRun:
         assert "CONTRACT VIEW applied: lake.contract.trace" in out
         assert "CONTRACT VIEW applied: lake.contract.mon_jdls_parsed" in out
         assert "apply-views: 3 view(s) applied" in out
+        # No SHOW COLUMNS rows were supplied (RecordingClient returns [] for
+        # every statement) -- vacuously no drift, no warning either way.
+        assert "WARNING" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Drift detection (review fix, "the silent-NULL trap"): contract_columns.py
+# is a static mapping frozen against the kind fixture's live jdl__* vocabulary
+# (12 of 66 JDL contract fields). At Plan-4 cutover, dlt evolves NEW jdl__*
+# columns from production JDLs whose base data would then exist live while
+# the contract view kept silently emitting a typed NULL for it. This section
+# diffs `SHOW COLUMNS FROM lake.alice.<table>` against everything
+# contract_columns.py/TABLE_SPECS already accounts for -- see views.py's
+# module docstring, "Drift detection" section, for the full design.
+# ---------------------------------------------------------------------------
+
+
+class FakeShowColumnsClient:
+    """Records every statement; returns canned `SHOW COLUMNS FROM
+    lake.alice.<table>` rows keyed by table name, `[]` for anything else
+    (matches apply_views()'s CREATE SCHEMA/CREATE VIEW statements, which this
+    fake is not exercising)."""
+
+    def __init__(self, columns_by_table: dict[str, list[list]]):
+        self.statements: list[str] = []
+        self._columns_by_table = columns_by_table
+
+    def run(self, sql: str, poll_interval: float = 1.0):
+        self.statements.append(sql)
+        for table, rows in self._columns_by_table.items():
+            if sql == f"SHOW COLUMNS FROM lake.alice.{table}":
+                return rows
+        return []
+
+
+def _known_live_rows(spec) -> list[list]:
+    """Every column `spec` already accounts for (mapped + passthrough),
+    rendered as canned `SHOW COLUMNS` rows -- the "no drift" baseline a test
+    starts from before injecting an extra, unmapped column."""
+    rows = [[name, "varchar", "", None] for name in spec.columns.values() if name is not None]
+    rows += [[name, "varchar", "", None] for name in spec.passthrough]
+    return rows
+
+
+class TestCheckTableDrift:
+    def test_no_drift_when_live_columns_are_all_known(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": _known_live_rows(spec)})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert result.table == "mon_jdls_parsed"
+        assert result.unmapped_jdl_columns == ()
+        assert result.other_unmapped_columns == ()
+        assert result.has_jdl_drift is False
+
+    def test_unmapped_jdl_column_is_flagged_with_its_live_type(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        rows = _known_live_rows(spec) + [["jdl__new_field", "varchar", "", None]]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": rows})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert result.unmapped_jdl_columns == (("jdl__new_field", "varchar"),)
+        assert result.has_jdl_drift is True
+
+    def test_unmapped_jdl_column_type_is_captured_even_when_non_varchar(self):
+        # Brief: "a future non-varchar arrival must be visible."
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        rows = _known_live_rows(spec) + [["jdl__future_numeric", "bigint", "", None]]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": rows})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert result.unmapped_jdl_columns == (("jdl__future_numeric", "bigint"),)
+
+    def test_non_jdl_unmapped_column_is_informational_only(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        rows = _known_live_rows(spec) + [["some_new_dlt_helper", "varchar", "", None]]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": rows})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert result.unmapped_jdl_columns == ()
+        assert result.other_unmapped_columns == (("some_new_dlt_helper", "varchar"),)
+        assert result.has_jdl_drift is False
+
+    def test_queries_the_source_alice_table_not_the_contract_view(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["job_info"]
+        client = FakeShowColumnsClient({"job_info": _known_live_rows(spec)})
+
+        check_table_drift(client, "job_info", spec)
+
+        assert client.statements == ["SHOW COLUMNS FROM lake.alice.job_info"]
+
+
+class TestCheckDrift:
+    def test_one_result_per_table_in_table_specs_order(self):
+        from alice_ingest.views import TABLE_SPECS, check_drift
+
+        client = FakeShowColumnsClient({})
+        results = check_drift(client)
+
+        assert [r.table for r in results] == list(TABLE_SPECS)
+
+    def test_no_drift_across_all_three_tables_when_fixture_matches_mapping(self):
+        # The real invariant this task's brief expects TODAY on kind: 12 of
+        # 66 jdl__* fields live, all 12 mapped -- zero drift anywhere.
+        from alice_ingest.views import TABLE_SPECS, check_drift
+
+        columns_by_table = {table: _known_live_rows(spec) for table, spec in TABLE_SPECS.items()}
+        client = FakeShowColumnsClient(columns_by_table)
+
+        results = check_drift(client)
+
+        assert all(not r.has_jdl_drift for r in results)
+        assert all(not r.other_unmapped_columns for r in results)
+
+
+class TestRunDriftReporting:
+    """`run()`-level integration-shaped tests (brief's four required cases):
+    no drift -> no warning, exit 0; one unmapped jdl__ column -> warning with
+    name:type, exit 0; same with --strict -> exit 2; non-jdl__ unmapped live
+    column -> informational note only, never strict-fails."""
+
+    @staticmethod
+    def _client_factory(columns_by_table: dict[str, list[list]]):
+        class RecordingClient:
+            def __init__(self, base_uri, user="alice-ingest", timeout=30.0):
+                self.base_uri = base_uri
+
+            def run(self, sql, poll_interval=1.0):
+                for table, rows in columns_by_table.items():
+                    if sql == f"SHOW COLUMNS FROM lake.alice.{table}":
+                        return rows
+                return []
+
+        return RecordingClient
+
+    def _no_drift_columns(self):
+        from alice_ingest.views import TABLE_SPECS
+
+        return {table: _known_live_rows(spec) for table, spec in TABLE_SPECS.items()}
+
+    def test_no_drift_prints_no_warning_and_exits_zero(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        monkeypatch.setattr(
+            views_module, "TrinoClient", self._client_factory(self._no_drift_columns())
+        )
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        assert "WARNING" not in capsys.readouterr().err
+
+    def test_one_unmapped_jdl_column_warns_but_exits_zero_without_strict(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        columns_by_table = self._no_drift_columns()
+        columns_by_table["mon_jdls_parsed"] = columns_by_table["mon_jdls_parsed"] + [
+            ["jdl__new_field", "varchar", "", None]
+        ]
+        monkeypatch.setattr(views_module, "TrinoClient", self._client_factory(columns_by_table))
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "jdl__new_field:varchar" in err
+        assert "contract regeneration" in err
+
+    def test_unmapped_jdl_column_with_strict_exits_two(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        columns_by_table = self._no_drift_columns()
+        columns_by_table["mon_jdls_parsed"] = columns_by_table["mon_jdls_parsed"] + [
+            ["jdl__new_field", "varchar", "", None]
+        ]
+        monkeypatch.setattr(views_module, "TrinoClient", self._client_factory(columns_by_table))
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"}, strict=True)
+
+        assert exit_code == 2
+        assert "jdl__new_field:varchar" in capsys.readouterr().err
+
+    def test_non_jdl_unmapped_column_never_strict_fails(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        columns_by_table = self._no_drift_columns()
+        columns_by_table["mon_jdls_parsed"] = columns_by_table["mon_jdls_parsed"] + [
+            ["some_new_dlt_helper", "varchar", "", None]
+        ]
+        monkeypatch.setattr(views_module, "TrinoClient", self._client_factory(columns_by_table))
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"}, strict=True)
+
+        assert exit_code == 0
+        err = capsys.readouterr().err
+        assert "WARNING" not in err
+        assert "INFO" in err
+        assert "some_new_dlt_helper:varchar" in err
+
+    def test_strict_defaults_to_false(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        columns_by_table = self._no_drift_columns()
+        columns_by_table["mon_jdls_parsed"] = columns_by_table["mon_jdls_parsed"] + [
+            ["jdl__new_field", "varchar", "", None]
+        ]
+        monkeypatch.setattr(views_module, "TrinoClient", self._client_factory(columns_by_table))
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
