@@ -297,8 +297,14 @@ which `TRUNCATE`s and re-seeds deterministically; note its `CREATE TABLE IF
 NOT EXISTS` does not migrate an existing table's columns, so drop the PG
 tables first if the fixture's schema itself changed).
 
+This is a destructive operation: **always check your kubectl context before running.** The script guards against accidental execution on non-kind clusters by requiring the `--yes` flag and refusing non-kind contexts unless `--force-context` is added. The guard prevents catastrophic data loss on production or long-running test clusters.
+
 ```bash
-hack/reset-pipeline.sh
+# On kind: requires explicit --yes
+hack/reset-pipeline.sh --yes
+
+# On a non-kind cluster (only if you are sure): add --force-context
+hack/reset-pipeline.sh --yes --force-context
 ```
 
 Idempotent and safe to rerun: reports `0 table(s)` / `namespace ... already

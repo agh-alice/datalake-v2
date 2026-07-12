@@ -1,6 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# Destructive-action guard (P2T6 review): this wipes the ENTIRE alice Iceberg
+# namespace + dlt S3 state for whatever cluster the current kubectl context
+# points at. Refuse non-kind contexts unless explicitly forced.
+CTX=$(kubectl config current-context 2>/dev/null || echo "unknown")
+if [ "${1:-}" != "--yes" ]; then
+  echo "reset-pipeline: DESTRUCTIVE. Current context: $CTX"
+  echo "Re-run as: hack/reset-pipeline.sh --yes   (add --force-context for non-kind contexts)"
+  exit 1
+fi
+if [ "$CTX" != "kind-datalake-v2" ] && [ "${2:-}" != "--force-context" ]; then
+  echo "reset-pipeline: REFUSING non-kind context '$CTX' without --force-context"; exit 1
+fi
+
 # Full reset of the pipeline's OUTPUT state (Iceberg catalog + the underlying
 # S3 objects), for use before a from-scratch backfill or whenever the
 # `alice` namespace's schema needs to be forced back to empty (docs/
