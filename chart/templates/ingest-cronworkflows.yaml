@@ -1,0 +1,70 @@
+# Plan 2 Task 4: nightly ingestion+retention and site-sonar CronWorkflows.
+# Same v4 `schedules:` list schema as chart/templates/hello-cronworkflow.yaml
+# (Task 7 finding: legacy singular `schedule` is rejected by the CRDs
+# shipped with argo-workflows chart 1.0.19 / app v4.0.7 -- verified via
+# `kubectl explain cronworkflow.spec.schedules`), same pipeline-runner
+# ServiceAccount + RBAC (chart/templates/workflows-rbac.yaml), same
+# ttlStrategy cleanup pattern -- 86400s (24h) here rather than hello's 3600s
+# so a failed nightly run's pod/logs survive long enough for a human to
+# triage the next morning.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: ingest-nightly
+  namespace: argo-workflows
+spec:
+  schedules: [{{ .Values.ingest.schedules.nightly | quote }}]
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: pipeline-runner
+    entrypoint: main
+    ttlStrategy: {secondsAfterCompletion: 86400}
+    templates:
+      # 2-step DAG: run-retention only starts once run-nightly has
+      # Succeeded (brief: "retention only after successful ingest -- hard
+      # dependency"). Argo's default DAG semantics already enforce this --
+      # a task with `dependencies` does not start unless every dependency
+      # succeeded (no continueOn set here), and the DAG itself fails if
+      # run-nightly fails, so run-retention never executes against a
+      # partial/failed ingest.
+      - name: main
+        dag:
+          tasks:
+            - name: run-nightly
+              template: run-nightly
+            - name: run-retention
+              template: run-retention
+              dependencies: [run-nightly]
+      - name: run-nightly
+        container:
+          image: {{ .Values.images.ingest }}
+          envFrom:
+            - secretRef: {name: ingest-env}
+          args: ["run-nightly"]
+      - name: run-retention
+        container:
+          image: {{ .Values.images.ingest }}
+          envFrom:
+            - secretRef: {name: ingest-env}
+          args: ["run-retention"]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: ingest-sitesonar
+  namespace: argo-workflows
+spec:
+  schedules: [{{ .Values.ingest.schedules.sitesonar | quote }}]
+  concurrencyPolicy: Forbid
+  workflowSpec:
+    serviceAccountName: pipeline-runner
+    entrypoint: main
+    ttlStrategy: {secondsAfterCompletion: 86400}
+    templates:
+      - name: main
+        container:
+          image: {{ .Values.images.ingest }}
+          envFrom:
+            - secretRef: {name: ingest-env}
+          args: ["run-sitesonar"]

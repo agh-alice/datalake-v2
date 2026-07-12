@@ -25,7 +25,18 @@ cd "$(dirname "$0")/.."
 #     this is trace's incremental cursor per pipeline.py's build_trace_source;
 #     values spread over the same 30-day window as the other timestamps so
 #     the incremental extraction actually has variance to exercise across
-#     reruns/retention, not a single constant).
+#     reruns/retention, not a single constant. UNIT FIX (Plan 2 Task 4):
+#     laststatuschangetimestamp is stored as epoch MILLISECONDS in
+#     production (gen-1 Java convention, per the Task 4 brief) -- this
+#     fixture previously emitted `extract(epoch FROM ts)::bigint`, epoch
+#     SECONDS, verified empirically against the live kind fixture (sample
+#     value ~1.78e9, same magnitude as `extract(epoch FROM now())`, not
+#     ~1.78e12 as a true ms value would be). retention.py's trace-table
+#     cutoff predicate must match real production semantics
+#     (`to_timestamp(laststatuschangetimestamp / 1000.0)`), so the
+#     mismatch is fixed at the source here (x1000) rather than papered
+#     over with a magnitude-sniffing heuristic in retention code that
+#     would never see real production data.).
 #   mon_jdls (3 cols, not 2 -- review fix, ground truth doc corrected the
 #     brief's original 2-col assumption): job_id bigint, lpmjobtypeid
 #     varchar, full_jdl text -- full_jdl includes JDL text with BOTH
@@ -135,7 +146,7 @@ SELECT
   (100 + (random() * 36000))::integer,
   400000 + (gs % 800000),
   'ALICE::SITE_' || lpad((1 + gs % 25)::text, 2, '0'),
-  extract(epoch FROM ts)::bigint
+  (extract(epoch FROM ts) * 1000)::bigint
 FROM (
   SELECT gs, now() - ((gs % 30) || ' days')::interval - ((gs * 7 % 24) || ' hours')::interval AS ts
   FROM generate_series(1, 1000) gs

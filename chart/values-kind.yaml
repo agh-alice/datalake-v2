@@ -4,3 +4,14 @@ landingDb:
   instances: 1
   storageSize: 2Gi
 
+# Tighter schedules than production defaults (chart/values.yaml) purely for
+# kind-cluster observability -- lets a human watching `kubectl get
+# cronworkflow -n argo-workflows -w` actually see a tick within a working
+# session instead of waiting until 02:00/03:00. The Task 4 acceptance run
+# still triggers a one-off Workflow manually (hack/run-ingest-once.sh's
+# create-from-workflowSpec pattern) rather than waiting on either schedule.
+ingest:
+  schedules:
+    nightly: "*/15 * * * *"
+    sitesonar: "*/20 * * * *"
+

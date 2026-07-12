@@ -50,3 +50,19 @@ landingDb:
 # this chart (no-secrets-in-rendered-branches constraint; upstream
 # auto-generation relies on helm lookup which ArgoCD render does not support,
 # argoproj/argo-cd#5202).
+
+# CronWorkflow scheduling (Plan 2 Task 4). Consumed by
+# chart/templates/ingest-cronworkflows.yaml's `.Values.ingest.schedules.*`.
+# retentionDays documents the retention window operators must keep in sync
+# with the ingest-env Secret's RETENTION_DAYS key (harness-created --
+# hack/kind-up.sh on kind, ESO on cyfronet -- same no-secrets-in-rendered-
+# branches convention as lakekeeperDb's encryption key above); it is NOT
+# consumed by any chart template directly, since the CronWorkflow's
+# run-retention step gets RETENTION_DAYS via envFrom the Secret, not from
+# values -- this field exists so the intended value is visible in Git even
+# though the actual runtime value is set out-of-band.
+ingest:
+  schedules:
+    nightly: "0 2 * * *"
+    sitesonar: "0 3 * * *"
+  retentionDays: "14"

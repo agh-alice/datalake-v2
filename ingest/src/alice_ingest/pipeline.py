@@ -89,6 +89,45 @@ def _check_required_env(env: Mapping[str, str]) -> None:
         )
 
 
+def iceberg_catalog_properties(env: Mapping[str, str]) -> dict[str, str]:
+    """Flat dotted-key pyiceberg REST catalog properties -- the same shape
+    `pyiceberg.catalog.load_catalog(warehouse, **properties)` expects
+    (verified live against this cluster, Plan 2 Task 1's kind-verify.sh
+    probe and Task 4's retention.py). Shared by `configure_dlt()` (which
+    wraps this dict for dlt's filesystem destination) and
+    `retention.py`'s `load_iceberg_catalog()` (a direct pyiceberg REST
+    client for the presence-verification scan) so the two call sites can
+    never drift out of sync.
+
+    Per-key dotted assignment into dlt's config tree (e.g.
+    `dlt.secrets["...config.s3.endpoint"] = ...`) would nest: dlt's
+    accessor turns each dotted path into nested dict levels, so
+    "s3.endpoint" would land as {"s3": {"endpoint": ...}}. pyiceberg reads
+    catalog properties as a flat dict of dotted STRING keys (see
+    get_header_properties() etc.), so the nested form is silently ignored
+    at runtime -- this function's dict keys are the flat dotted strings
+    pyiceberg actually needs (correction recorded in
+    research/2026-07-12_dlt-iceberg-lakekeeper-api-verification.md).
+    """
+    s3_endpoint = _require_env(env, "S3_ENDPOINT")
+    s3_access_key = _require_env(env, "S3_ACCESS_KEY")
+    s3_secret_key = _require_env(env, "S3_SECRET_KEY")
+    s3_region = env.get("S3_REGION", DEFAULT_S3_REGION)
+    warehouse = _require_env(env, "LAKEKEEPER_WAREHOUSE")
+    catalog_uri = _require_env(env, "LAKEKEEPER_URI").rstrip("/") + "/catalog"
+    return {
+        "uri": catalog_uri,
+        "type": "rest",
+        "warehouse": warehouse,
+        "header.X-Iceberg-Access-Delegation": "vended-credentials",
+        "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
+        "s3.endpoint": s3_endpoint,
+        "s3.access-key-id": s3_access_key,
+        "s3.secret-access-key": s3_secret_key,
+        "s3.region": s3_region,
+    }
+
+
 def configure_dlt(env: Mapping[str, str]) -> None:
     """Assemble the filesystem destination + Iceberg REST catalog config.
 
@@ -97,13 +136,6 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     in-memory config provider dlt consults at these dotted paths does not
     distinguish config/secrets at lookup time; the split matters for
     toml-file hygiene only, which is moot since no toml ships in this image).
-
-    `iceberg_catalog_config` is assigned as one dict literal rather than
-    per-key dotted paths because dlt's dotted-path accessor nests each
-    assignment into `{"s3": {"endpoint": ...}}`, whereas pyiceberg reads
-    catalog properties as flat dotted-string keys such as "s3.endpoint"
-    (correction recorded in
-    research/2026-07-12_dlt-iceberg-lakekeeper-api-verification.md).
     """
     bucket = _require_env(env, "S3_BUCKET")
     s3_endpoint = _require_env(env, "S3_ENDPOINT")
@@ -111,7 +143,6 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     s3_secret_key = _require_env(env, "S3_SECRET_KEY")
     s3_region = env.get("S3_REGION", DEFAULT_S3_REGION)
     warehouse = _require_env(env, "LAKEKEEPER_WAREHOUSE")
-    catalog_uri = _require_env(env, "LAKEKEEPER_URI").rstrip("/") + "/catalog"
 
     # [destination.filesystem]
     dlt.secrets["destination.filesystem.bucket_url"] = f"s3://{bucket}"
@@ -126,25 +157,10 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     dlt.secrets["iceberg_catalog.iceberg_catalog_name"] = warehouse
     dlt.secrets["iceberg_catalog.iceberg_catalog_type"] = "rest"
 
-    # [iceberg_catalog.iceberg_catalog_config] -- set as ONE dict literal.
-    # Per-key dotted assignment (dlt.secrets["...config.s3.endpoint"] = ...)
-    # nests: dlt's accessor turns each dotted path into nested dict levels,
-    # so "s3.endpoint" would land as {"s3": {"endpoint": ...}}. pyiceberg's
-    # REST catalog reads its properties as a flat dict of dotted STRING
-    # keys (see get_header_properties() etc.), so the nested form is
-    # silently ignored at runtime. The dict's own keys are stored verbatim,
-    # which is what pyiceberg needs.
-    dlt.secrets["iceberg_catalog.iceberg_catalog_config"] = {
-        "uri": catalog_uri,
-        "type": "rest",
-        "warehouse": warehouse,
-        "header.X-Iceberg-Access-Delegation": "vended-credentials",
-        "py-io-impl": "pyiceberg.io.fsspec.FsspecFileIO",
-        "s3.endpoint": s3_endpoint,
-        "s3.access-key-id": s3_access_key,
-        "s3.secret-access-key": s3_secret_key,
-        "s3.region": s3_region,
-    }
+    # [iceberg_catalog.iceberg_catalog_config] -- set as ONE dict literal
+    # (see iceberg_catalog_properties()'s docstring for why: dlt's dotted
+    # per-key accessor would nest what pyiceberg needs flat).
+    dlt.secrets["iceberg_catalog.iceberg_catalog_config"] = iceberg_catalog_properties(env)
 
     # Gotcha carried from the research doc: keep purge-on-drop disabled --
     # Lakekeeper hard-deletes can purge recreated tables' files.
@@ -250,7 +266,7 @@ def run_nightly(env: Mapping[str, str] | None = None) -> int:
     return 0
 
 
-def run_sitesonar(env: Mapping[str, str] | None = None) -> int:
+def run_sitesonar(env: Mapping[str, str] | None = None, limit: int | None = None) -> int:
     env = env if env is not None else os.environ
     try:
         from alice_ingest.sitesonar import run as _run
@@ -261,7 +277,7 @@ def run_sitesonar(env: Mapping[str, str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    return _run(env)
+    return _run(env, limit=limit)
 
 
 def run_retention(env: Mapping[str, str] | None = None) -> int:
@@ -304,7 +320,19 @@ _COMMANDS = {
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="alice-ingest")
     parser.add_argument("command", choices=sorted(_COMMANDS))
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            "run-sitesonar only: cap fetching to the N most-recent "
+            "site-sonar .out.xz files (Plan 2 Task 4's bounded e2e probe: "
+            "`alice-ingest run-sitesonar --limit 1`). Ignored by other commands."
+        ),
+    )
     args = parser.parse_args(argv)
+    if args.command == "run-sitesonar":
+        return run_sitesonar(limit=args.limit)
     return _COMMANDS[args.command]()
 
 
