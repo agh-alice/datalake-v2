@@ -4,8 +4,12 @@ cd "$(dirname "$0")/.."
 ARGOCD_CHART_VERSION="10.1.3"   # from Step 1
 kind get clusters | grep -q '^datalake-v2$' || kind create cluster --config hack/kind-config.yaml
 helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
+# 10m timeout (Task 8 clean-room finding): on a fresh kind cluster every ArgoCD
+# image is a cold pull; 5m timed out mid-pull, leaving the release status=failed
+# and no ArgoCD installed. The install itself is idempotent (upgrade --install
+# recovers on rerun), but the first attempt should just succeed.
 helm upgrade --install argocd argo/argo-cd --version "$ARGOCD_CHART_VERSION" \
-  -n argocd --create-namespace -f environments/kind/argocd-values.yaml --wait --timeout 5m
+  -n argocd --create-namespace -f environments/kind/argocd-values.yaml --wait --timeout 10m
 # Private repo, read+write (commit-server pushes rendered branches). Owner decision 2026-07-12.
 # Two secret objects, same credential: the Source Hydrator's commit-server looks up push
 # credentials under the `repository-write` secret-type label, separately from the
