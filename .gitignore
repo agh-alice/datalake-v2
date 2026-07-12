@@ -1,0 +1,5 @@
+*.secret.yaml
+!*.enc.yaml
+kubeconfig*
+age.key
+.DS_Store

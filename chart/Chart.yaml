@@ -1,0 +1,5 @@
+apiVersion: v2
+name: datalake
+description: ALICE datalake v2 authored resources (DRY source; hydrated by ArgoCD Source Hydrator to environments/<env> branches)
+type: application
+version: 0.1.0

@@ -1,0 +1,4 @@
+creation_rules:
+  - path_regex: \.enc\.yaml$
+    age: >-
+      REPLACE_WITH_AGE_PUBLIC_KEY_FROM_make_sops-setup

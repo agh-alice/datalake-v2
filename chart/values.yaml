@@ -1,0 +1,7 @@
+namespaces:
+  - cnpg-system
+  - external-secrets
+  - monitoring
+  - argo-workflows
+  - lakekeeper
+  - landing-db
