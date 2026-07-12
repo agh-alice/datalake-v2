@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "ffa35179fcc62b3a57eb1c46cf8708076f2e0f7d",
+  "drySha": "c225a696f459b98f617d77ec2298608e19d91c3b",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T15:59:45Z",
-  "subject": "chore: pin ingest image digest for maintenance + sitesonar skip",
-  "body": "CI run 29199201066 (commit f207136) -- adds alice_ingest/maintenance.py\n(run-maintenance was a stub until now) and sitesonar.py's high-water-mark\nfile skip. Verified resolvable via the GHCR registry API before pinning.\n"
+  "date": "2026-07-12T16:11:40Z",
+  "subject": "fix: use exported_namespace, not namespace, in pipeline alert exprs",
+  "body": "Verified live against Prometheus's own stored series after the rules\nfirst loaded: the argo-workflows-workflow-controller ServiceMonitor sets\nhonorLabels: false (chart default), so Prometheus's own scrape-target\nnamespace wins the plain `namespace` label and the scraped metric's own\nnamespace value (the workflow's namespace, what these alerts need) is\nrelabeled to `exported_namespace`. On this cluster the controller pod\nhappens to run in the same namespace as the workflows it manages, so the\noriginal `namespace=\"argo-workflows\"` filter silently matched by\ncoincidence rather than by correct semantics -- caught by cross-checking\nthe raw /metrics text against Prometheus's /api/v1/query label set for\nthe same series, not assumed.\n"
 }
