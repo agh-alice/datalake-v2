@@ -61,7 +61,6 @@ spec:
     enablePodMonitor: false
   postgresql:
     parameters:
-      autovacuum_freeze_max_age: "200000000"
       max_connections: "60"
   storage:
     size: 2Gi
