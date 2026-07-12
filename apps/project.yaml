@@ -1,0 +1,20 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: datalake
+  namespace: argocd
+spec:
+  description: ALICE datalake v2
+  sourceRepos:
+    - https://github.com/agh-alice/datalake-v2.git
+    - https://cloudnative-pg.github.io/charts
+    - https://charts.external-secrets.io
+    - https://prometheus-community.github.io/helm-charts
+    - https://argoproj.github.io/argo-helm
+    - https://lakekeeper.github.io/lakekeeper-charts/
+  destinations:
+    - namespace: '*'
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'

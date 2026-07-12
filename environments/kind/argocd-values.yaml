@@ -1,0 +1,22 @@
+configs:
+  params:
+    server.insecure: true
+    hydrator.enabled: "true"
+commitServer:
+  enabled: true
+dex:
+  enabled: false
+# --- Execution-time deviation (Task 2, Steps 1-2, 2026-07-12) ---
+# Chart argo/argo-cd 10.1.3 is the newest published chart at execution time, but it
+# bundles appVersion v3.4.5 (Source Hydrator = alpha). ArgoCD v3.5.0 (Source Hydrator
+# beta, incl. hydrator timeout/requeue fixes) has not GA'd yet -- only v3.5.0-rc1/rc2
+# exist upstream, and no argo-helm chart version bundles v3.5.x. global.image.tag
+# overrides the chart's default tag (Chart.AppVersion) for every core component
+# (controller, repo-server, server, applicationset, commit-server, dex) via the shared
+# `argo-cd.defaultTag` helper -- confirmed by reading templates/_common.tpl and every
+# templates/argocd-*/deployment.yaml in chart 10.1.3. Pinning here to run actual v3.5
+# hydrator code on top of the newest chart structure, instead of shipping the v3.4.5
+# alpha-stability hydrator. Re-evaluate once v3.5.0 GA ships and a chart bundles it.
+global:
+  image:
+    tag: v3.5.0-rc2
