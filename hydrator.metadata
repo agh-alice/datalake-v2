@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "e500de8aea73a5f555af8075587f98c29b336d1c",
+  "drySha": "8da10f9a5498593fcc361faea568c10f0f3b7706",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T23:05:54Z",
-  "subject": "chore: pin ingest image digest for contract views (apply-views)",
-  "body": "CI build from ded0d96 (feat: contract views restoring consumer column\nspellings). Digest confirmed via docker buildx imagetools inspect\nagainst the pushed manifest-list tag, matching the build-push-action\nstep's \"exporting manifest list\" log line.\n"
+  "date": "2026-07-12T23:36:42Z",
+  "subject": "chore: pin ingest image digest for apply-views drift-detection fix",
+  "body": "New image includes the drift-detection/--strict gate + regeneration\nprocedure from 24af764 (Plan 3 Task 2 review-fix wave). CI run 29213645823,\ndigest verified via docker buildx imagetools inspect (matches the build\nlog's manifest-list digest) and resolvable via the GHCR registry API.\n"
 }
