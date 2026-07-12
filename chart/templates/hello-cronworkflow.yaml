@@ -14,6 +14,12 @@ spec:
   workflowSpec:
     serviceAccountName: pipeline-runner
     entrypoint: main
+    # Task 8 review finding (Task 7 concern #2): completed Workflow objects
+    # don't otherwise get cleaned up (CronWorkflow's successfulJobsHistoryLimit/
+    # failedJobsHistoryLimit default only bounds *scheduled* runs' history, and
+    # the manual probe workflow below has no history limit at all) -- ttlStrategy
+    # deletes each completed Workflow object 1h after it finishes.
+    ttlStrategy: {secondsAfterCompletion: 3600}
     templates:
       - name: main
         container:

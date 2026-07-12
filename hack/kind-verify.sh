@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
-EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper external-secrets monitoring argo-workflows)   # extended by later tasks
+# Dependency-first order (Task 8 review finding): CRD-providing apps verify
+# before their consumers. This ordering is NOT what makes convergence
+# succeed -- ArgoCD's automated selfHeal retries each Application
+# independently until its CRDs exist, regardless of the order this script
+# checks them in. It only makes the *verify loop* deterministic-ish: a
+# CRD-provider is far more likely to already be Synced/Healthy by the time
+# we poll it, so an early consumer poll doesn't spend its own 60x10s budget
+# waiting on a dependency that was going to converge anyway.
+# cloudnative-pg / external-secrets / monitoring provide CRDs (Cluster,
+# ExternalSecret/ClusterSecretStore, ServiceMonitor/PodMonitor/PrometheusRule)
+# consumed by lakekeeper, argo-workflows and datalake-kind's chart templates.
+# datalake-kind is checked last -- it renders resources (PrometheusRule,
+# ServiceMonitor, CNPG Clusters, ExternalSecrets) that depend on every other
+# app's CRDs. workflows-rbac is a chart template (SA/Role/RoleBinding), not
+# an Application, so it has no separate entry here.
+EXPECTED_APPS=(cloudnative-pg external-secrets monitoring lakekeeper argo-workflows datalake-kind)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -77,20 +92,28 @@ echo "kind-verify: all applications Synced/Healthy"
 # the CronWorkflow itself ticks every 5m; this proves the pipeline-runner SA
 # + RBAC + digest-pinned image actually execute a workflow, without waiting
 # for a scheduled tick.
-kubectl -n argo-workflows create -f - <<EOF
+# Task 8 review finding (Task 7 concern #1): querying items[-1] sorted by
+# creationTimestamp is racy -- a cron tick landing inside the 30s sleep below
+# can make the newest workflow the scheduled one (possibly still Running),
+# producing a spurious FAIL. Capture the created object's own name via
+# `create -o name` and query exactly that workflow instead.
+WF_NAME=$(kubectl -n argo-workflows create -o name -f - <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata: {generateName: hello-manual-}
 spec:
   serviceAccountName: pipeline-runner
   entrypoint: main
+  ttlStrategy: {secondsAfterCompletion: 3600}
   templates:
     - name: main
       container: {image: $(kubectl -n argo-workflows get cronworkflow hello -o jsonpath='{.spec.workflowSpec.templates[0].container.image}'), command: [sh, -c, "echo verify"]}
 EOF
+)
 sleep 30
-# Hard gate (probe pattern per Task 2/3 reviews)
-if kubectl -n argo-workflows get workflows --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].status.phase}' | grep -q Succeeded; then
+# Hard gate (probe pattern per Task 2/3 reviews) -- queries the exact
+# workflow created above, immune to concurrent cron ticks.
+if kubectl -n argo-workflows get "$WF_NAME" -o jsonpath='{.status.phase}' | grep -q Succeeded; then
   echo "workflow execution OK"
 else
   echo "FAIL: manual verification workflow did not succeed"; exit 1

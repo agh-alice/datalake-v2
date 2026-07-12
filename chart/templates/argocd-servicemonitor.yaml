@@ -2,11 +2,26 @@
 # argocd_app_info, which only exists once the application controller's metrics
 # endpoint is scraped. environments/kind/argocd-values.yaml turns the endpoint on
 # (controller.metrics.enabled: true) but deliberately skips the argo-cd chart's own
-# serviceMonitor.enabled -- on a clean-room kind-up, ArgoCD (sync-wave -- installed
-# by hack/kind-up.sh before apps/) is live before the kube-prometheus-stack CRDs
-# exist, so a serviceMonitor rendered by the argo-cd chart at that point would fail.
-# This chart hydrates after kube-prometheus-stack (monitoring Application, sync-wave
-# "1"), so the CRD is guaranteed to exist by the time this renders/applies.
+# serviceMonitor.enabled -- on a clean-room kind-up, ArgoCD is installed by
+# hack/kind-up.sh before the kube-prometheus-stack CRDs exist, so a serviceMonitor
+# rendered by the argo-cd chart at that point would fail.
+#
+# Task 8 review finding (correcting the claim this comment used to make): the
+# `argocd.argoproj.io/sync-wave` annotations on apps/infra/*.yaml Applications
+# do NOT mechanically order this chart's render after kube-prometheus-stack's
+# install. Sync-wave only orders resources *within* a single Application's own
+# sync operation; apps/infra/*.yaml are standalone Applications applied
+# directly (`kubectl apply -f apps/infra/`), not resources owned by one parent
+# Application, so their sync-wave annotations are inert here. This
+# ServiceMonitor CRD is defined by kube-prometheus-stack and consumed by this
+# chart (datalake-kind), a separate Application with its own, independent sync
+# loop -- there is no ordering guarantee between the two. What actually makes
+# this converge: ArgoCD's `syncPolicy.automated.selfHeal: true` on every
+# Application (including datalake-kind) means a sync that fails because the
+# CRD doesn't exist yet is simply retried; once kube-prometheus-stack installs
+# the CRD, the next selfHeal retry against datalake-kind succeeds. Convergence
+# is eventual, not ordered -- expect this resource to fail to apply for a
+# window on a clean-room kind-up and self-heal shortly after.
 #
 # Targets Service argocd-application-controller-metrics (ns argocd), created live by
 # the argo-cd chart once controller.metrics.enabled is set -- verified post-upgrade:

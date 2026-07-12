@@ -12,9 +12,22 @@ dex:
 # this on, so the alert was dead on arrival (loaded but could never fire). Enabling the
 # metrics endpoint here; the chart's built-in serviceMonitor is intentionally NOT
 # enabled -- on a clean-room kind-up ArgoCD installs before the Prometheus-operator
-# CRDs exist (Task 2 sync-wave ordering), so a serviceMonitor: {enabled: true} here
-# would fail to render/apply. The ServiceMonitor lives in chart/templates instead,
-# where it hydrates after kube-prometheus-stack.
+# CRDs exist, so a serviceMonitor: {enabled: true} here would fail to render/apply.
+# The ServiceMonitor lives in chart/templates instead (chart/templates/argocd-
+# servicemonitor.yaml), applied by the separate datalake-kind Application.
+#
+# Task 8 review finding (correcting the claim this comment used to make): there
+# is no mechanically enforced ordering ("sync-wave ordering") that guarantees
+# the Prometheus-operator CRDs exist before datalake-kind renders that
+# ServiceMonitor -- ArgoCD Applications applied as standalone objects (as
+# apps/infra/*.yaml and environments/kind/apps/*.yaml are here) each sync
+# independently; sync-wave annotations only order resources within a single
+# Application's own sync, not across separate Applications. Convergence
+# instead relies on `syncPolicy.automated.selfHeal: true` (set on every
+# Application in this repo): a sync that fails because a CRD is missing gets
+# retried automatically, and once kube-prometheus-stack installs the CRD the
+# next selfHeal pass on datalake-kind succeeds. Treat this as eventual
+# convergence, not guaranteed ordering.
 controller:
   metrics:
     enabled: true
