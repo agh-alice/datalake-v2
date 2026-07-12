@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "d53de5f4040b458b1c531eaf8be67e044042f65f",
+  "drySha": "96e0c51c51dd5c1f817a356c2f8f4ef07a099e53",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T14:47:37Z",
-  "subject": "chore: pin fixed ingest digest; widen kind CronWorkflow schedules",
-  "body": "Digest bump for 1a73df7's two-phase retention-pass fix. CI run 29196867242,\nverified resolvable via the GHCR registry API.\n\nAlso widens kind's ingest CronWorkflow schedules from */15 and */20 to\nevery 6h: at */15 the schedule auto-fired mid-verification (Task 4's own\nacceptance run caught this), racing the manual before/after retention\ncheck against a concurrent auto-triggered run on the same fixture data.\nconcurrencyPolicy: Forbid only guards CronWorkflow-scheduled runs against\neach other, not against a manually kubectl-created Workflow.\n"
+  "date": "2026-07-12T15:26:22Z",
+  "subject": "chore: pin ingest image digest for the provenance/guard/orphan fixes",
+  "body": "CI run 29198121784 (commit 1e94a8c), verified resolvable via the GHCR\nregistry API before pinning.\n"
 }
