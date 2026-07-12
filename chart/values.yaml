@@ -15,18 +15,19 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29205620324
-# (commit a697e5c, ingest-image workflow, Plan 2 FINAL-review wave N1-N5:
-# retention TOCTOU + orphan bound, mon_jdls max_table_nesting=1, sitesonar
-# progress log + SITESONAR_LIMIT; the prior pin [sha256:1b2a1c25...]
-# predates it); verified resolvable via the GHCR registry API
-# (`GET /v2/agh-alice/datalake-v2-ingest/manifests/<digest>` with an
-# anonymous pull token, HTTP 200) -- same index-manifest structure as the
-# previous pin. Consumed by chart/templates/ingest-cronworkflows.yaml
-# (Task 4 nightly/sitesonar, Task 5 maintenance).
+# reviewable in the rendered-branch diff. Pinned from CI run 29206122224
+# (commit e059924, ingest-image workflow, Plan 2 FINAL-review wave
+# follow-up: fixes mon_jdls's delete-ordering bug found live while
+# verifying N3 against the a697e5c pin -- see _DELETE_ORDER in
+# retention.py; the prior pin [sha256:6aa4c263...] predates it); verified
+# resolvable via the GHCR registry API (`GET /v2/agh-alice/datalake-v2-
+# ingest/manifests/<digest>` with an anonymous pull token, HTTP 200) --
+# same index-manifest structure as the previous pin. Consumed by
+# chart/templates/ingest-cronworkflows.yaml (Task 4 nightly/sitesonar,
+# Task 5 maintenance).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:6aa4c263a221fc85c210fd3c5c5e1f548c7c30c0d72e574f6a129feed345259c"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:388dd986af8e8f9821ff57ba71cd084d641b814f6c7080204b10ca8071191399"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
