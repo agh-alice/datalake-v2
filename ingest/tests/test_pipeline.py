@@ -5,10 +5,23 @@ Exercises only the pure resolution helpers (`_resolve_naive_initial_value`,
 `_resolve_int_initial_value`) -- NOT `build_job_info_source`/
 `build_trace_source`/`build_mon_jdls_resource` themselves, which call dlt's
 `sql_database`/`sql_table` and need a live PG connection for reflection
-(no fake-able seam for that here). Those three, and the env hook actually
-threading through them end to end, are proven live by
-`hack/run-ingest-once.sh` against the kind fixture (see docs/runbooks/
-backfill.md), not by this unit suite.
+(no fake-able seam for that here).
+
+The env hook threading through those three end to end (env var -> pod ->
+`_resolve_naive_initial_value`/`_resolve_int_initial_value` -> dlt
+incremental cursor -> actual row filtering) is NOT exercised by
+`hack/run-ingest-once.sh` (that script never sets an `INGEST_INITIAL_*`
+var, only the default/unset path) -- it was instead verified live,
+one-off, in Plan 2 Task 6: `hack/reset-pipeline.sh`, then a manual
+Workflow with `INGEST_INITIAL_JOB_INFO=2030-01-01` against the freshly
+reset kind fixture, then an Iceberg-scan probe. Result: `job_info
+count=0` (every fixture row's `last_update` is well before 2030, so the
+override correctly excluded all of them) while `trace count=1000` and
+`mon_jdls_parsed count=1000` loaded normally on their (also freshly reset)
+defaults -- confirming the override reaches dlt's cursor and actually
+changes what gets fetched, not just that the value parses. Not repeatable
+as an automated test here (needs the live cluster); see
+docs/runbooks/backfill.md for the reusable manual procedure.
 """
 
 from __future__ import annotations
