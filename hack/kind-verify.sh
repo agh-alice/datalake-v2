@@ -27,11 +27,23 @@ else
 fi
 # Hard gate: the probe must actually gate (Task 2/3 review pattern). A 4xx on the
 # unconfigured-warehouse query is acceptable proof of liveness; connection failure is not.
-if kubectl -n lakekeeper run rest-probe --rm -i --restart=Never --image=curlimages/curl -- \
-     sh -c 'curl -s -o /dev/null -w "%{http_code}" http://lakekeeper.lakekeeper.svc:8181/catalog/v1/config?warehouse=none' \
-     | grep -qE "^[234]"; then
+# `kubectl run --rm -i` attaches container stdout to the client over the same session
+# used for stdin; in a non-TTY runner the attach can silently fail to relay output (only
+# the `--rm` "pod deleted" message reaches stdout, dropping the actual curl result) --
+# create/poll/logs/delete avoids the attach path entirely.
+kubectl -n lakekeeper delete pod rest-probe --ignore-not-found >/dev/null 2>&1
+kubectl -n lakekeeper run rest-probe --restart=Never --image=curlimages/curl -- \
+  sh -c 'curl -s -o /dev/null -w "%{http_code}" http://lakekeeper.lakekeeper.svc:8181/catalog/v1/config?warehouse=none' >/dev/null
+for i in $(seq 1 30); do
+  phase=$(kubectl -n lakekeeper get pod rest-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 2
+done
+REST_CODE=$(kubectl -n lakekeeper logs rest-probe 2>/dev/null || echo "")
+kubectl -n lakekeeper delete pod rest-probe --ignore-not-found >/dev/null 2>&1
+if echo "$REST_CODE" | grep -qE "^[234]"; then
   echo "lakekeeper REST endpoint reachable"
 else
-  echo "FAIL: lakekeeper REST endpoint unreachable"; exit 1
+  echo "FAIL: lakekeeper REST endpoint unreachable (got: '$REST_CODE')"; exit 1
 fi
 echo "kind-verify: all applications Synced/Healthy"
