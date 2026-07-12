@@ -30,7 +30,7 @@ ARGOCD_CHART_VERSION="10.1.3"   # confirm current pin: `helm search repo argo/ar
                                   # which records the same chart/appVersion deviation (see §5 below)
 helm repo add argo https://argoproj.github.io/argo-helm
 helm upgrade --install argocd argo/argo-cd --version "$ARGOCD_CHART_VERSION" \
-  -n argocd --create-namespace -f environments/cyfronet/argocd-values.yaml --wait --timeout 5m
+  -n argocd --create-namespace -f environments/cyfronet/argocd-values.yaml --wait --timeout 10m
 ```
 
 ## 2. Repo access: write-capable SSH deploy key, SOPS-encrypted

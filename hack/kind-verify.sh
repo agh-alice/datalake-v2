@@ -25,6 +25,22 @@ for app in "${EXPECTED_APPS[@]}"; do
     sleep 10
   done
 done
+# Hard gate (final review R1): "Synced" can be true against a STALE rendered
+# branch if the commit-server stops pushing (e.g. push-credential loss) --
+# every probe above and below would still pass while chart changes silently
+# stop deploying. Assert the hydrator's last successful dry SHA matches
+# origin/main's HEAD. Right after a push, hydration takes ~1-2 min to catch
+# up, so poll (every 15s, up to 300s) rather than checking once.
+MAIN_SHA=$(git ls-remote origin refs/heads/main | cut -f1)
+for i in $(seq 1 20); do
+  DRY_SHA=$(kubectl -n argocd get application datalake-kind -o jsonpath='{.status.sourceHydrator.lastSuccessfulOperation.drySHA}' 2>/dev/null || echo "")
+  if [ -n "$MAIN_SHA" ] && [ "$DRY_SHA" = "$MAIN_SHA" ]; then
+    echo "hydration current (drySHA == origin/main)"
+    break
+  fi
+  [ "$i" = 20 ] && { echo "FAIL: hydrator stale or dead (drySHA=$DRY_SHA main=$MAIN_SHA)"; exit 1; }
+  sleep 15
+done
 # Hard gate (probe pattern per Task 2/3 reviews: soft `A && echo` falls through under set -e)
 # Primary resolved via currentPrimary (Task 3 review Minor: never pin -1; failover breaks it)
 LK_PRIMARY=$(kubectl -n lakekeeper get cluster lakekeeper-db -o jsonpath='{.status.currentPrimary}')
@@ -87,7 +103,6 @@ if kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
 else
   echo "FAIL: datalake alert rules not loaded in Prometheus"; exit 1
 fi
-echo "kind-verify: all applications Synced/Healthy"
 # Manual Workflow run using the same image the CronWorkflow uses (Task 7) --
 # the CronWorkflow itself ticks every 5m; this proves the pipeline-runner SA
 # + RBAC + digest-pinned image actually execute a workflow, without waiting
@@ -118,3 +133,7 @@ if kubectl -n argo-workflows get "$WF_NAME" -o jsonpath='{.status.phase}' | grep
 else
   echo "FAIL: manual verification workflow did not succeed"; exit 1
 fi
+# Banner moved here (final review R1): this must be the LAST line of the
+# script. It used to print before the workflow probe above, so a log reader
+# scanning for this line would see "success" on a run that later failed.
+echo "kind-verify: all applications Synced/Healthy"
