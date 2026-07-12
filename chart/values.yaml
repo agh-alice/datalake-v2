@@ -15,11 +15,13 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Not yet consumed by a chart
-# template (CronWorkflows land in Task 4); placeholder until then.
+# reviewable in the rendered-branch diff. Pinned from CI run 29192531652
+# (commit 2c22b1b, ingest-image workflow); verified pullable via
+# `docker pull ghcr.io/agh-alice/datalake-v2-ingest@<digest>` (Task 2 Step 7).
+# Not yet consumed by a chart template (CronWorkflows land in Task 4).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "PLACEHOLDER_SET_AFTER_TASK_2_STEP_7_BUILD"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:c64bc2e7f36ca419382a450ef468fd35a4e3c6602ad31c2c8ba2efdb7a3bd494"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
