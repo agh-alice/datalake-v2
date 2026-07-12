@@ -4,7 +4,12 @@ metadata:
   name: hello
   namespace: argo-workflows
 spec:
-  schedule: "*/5 * * * *"
+  # CRDs shipped with argo-workflows chart 1.0.19 (app v4.0.7) drop the
+  # legacy singular `schedule` -- `schedules` (string list, v3.6+) is the
+  # only field in the schema, and ArgoCD's server-side apply rejects the
+  # old form ("field not declared in schema"). Verified live via
+  # `kubectl explain cronworkflow.spec.schedules` (Task 7).
+  schedules: ["*/5 * * * *"]
   concurrencyPolicy: Forbid
   workflowSpec:
     serviceAccountName: pipeline-runner
