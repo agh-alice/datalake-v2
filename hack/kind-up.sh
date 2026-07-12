@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/warehouse-config.sh
+. hack/lib/warehouse-config.sh
 ARGOCD_CHART_VERSION="10.1.3"   # from Step 1
 kind get clusters | grep -q '^datalake-v2$' || kind create cluster --config hack/kind-config.yaml
 helm repo add argo https://argoproj.github.io/argo-helm >/dev/null
@@ -88,6 +90,10 @@ hack/lakekeeper-warehouse.sh
 # example (research/2026-07-12_dlt-iceberg-lakekeeper-api-verification.md)
 # is therefore only correct for a warehouse created with NO key-prefix; ours
 # has one, so bucket_url must include it too.
+# Review fix (Task 3): the bucket/key-prefix literals used to be duplicated
+# by hand here and in hack/lakekeeper-warehouse.sh's storage-profile body --
+# both now source hack/lib/warehouse-config.sh's WAREHOUSE_BUCKET /
+# WAREHOUSE_KEY_PREFIX so a future change only has one place to make it.
 kubectl create namespace argo-workflows --dry-run=client -o yaml | kubectl apply -f -
 if kubectl -n argo-workflows get secret ingest-env >/dev/null 2>&1; then
   echo "ingest-env secret already exists"
@@ -106,7 +112,7 @@ else
     --from-literal=S3_ENDPOINT="http://minio.minio.svc:9000" \
     --from-literal=S3_ACCESS_KEY="$S3_ACCESS_KEY" \
     --from-literal=S3_SECRET_KEY="$S3_SECRET_KEY" \
-    --from-literal=S3_BUCKET="warehouse/lakekeeper-warehouse" \
+    --from-literal=S3_BUCKET="${WAREHOUSE_BUCKET}/${WAREHOUSE_KEY_PREFIX}" \
     --from-literal=S3_REGION="local-01" \
     --from-literal=LAKEKEEPER_URI="http://lakekeeper.lakekeeper.svc:8181" \
     --from-literal=LAKEKEEPER_WAREHOUSE="default" \

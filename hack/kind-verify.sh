@@ -169,20 +169,26 @@ fi
 # configure_dlt() docstring and research/2026-07-12_dlt-iceberg-lakekeeper-
 # api-verification.md).
 #
-# Two things verified empirically against this cluster in Task 3, not from
-# memory/docs:
-#   1. `catalog.load_table(...).scan().count()` IS a valid direct call on
-#      the pinned pyiceberg (0.11.1, resolved via dlt[pyiceberg]==1.28.2) --
-#      no to_arrow().num_rows fallback needed.
-#   2. dlt's naming convention does NOT collapse both LPM casings into one
-#      column. The mixed-case fixture value `LPMPassName` has a detectable
-#      camelCase boundary and normalizes to `jdl__lpm_pass_name`; the
-#      all-caps `LPMPASSNAME` has no boundary to split and normalizes to
-#      `jdl__lpmpassname`. Both are real, distinct columns in
-#      alice.mon_jdls_parsed (verified: 499 non-null rows each against the
-#      1000-row fixture's 50/50 split, minus the 2 deliberately-corrupt
-#      JDLs) -- assert both so a regression in either normalization path is
-#      caught, not just the substring-matching one.
+# Verified empirically against this cluster in Task 3, not from memory/docs:
+#   `catalog.load_table(...).scan().count()` IS a valid direct call on the
+#   pinned pyiceberg (0.11.1, resolved via dlt[pyiceberg]==1.28.2) -- no
+#   to_arrow().num_rows fallback needed.
+#
+# LPM casing assertion (review fix, Task 3 -- design spec section 4,
+# deliverables/2026-07-12-datalake-v2-design.md: "Fixed at ingestion rather
+# than in the consumer: ... LPMPassName/LPMPASSNAME casing"). Before the
+# fix, dlt's naming convention did NOT collapse the two casings on its own:
+# the mixed-case fixture value `LPMPassName` has a detectable camelCase
+# boundary and normalized to `jdl__lpm_pass_name`, while all-caps
+# `LPMPASSNAME` has no boundary to split and normalized to
+# `jdl__lpmpassname` -- two real, distinct columns, which is the split-key
+# regression the spec mandates fixing. ingest/src/alice_ingest/jdl.py now
+# coalesces both casings into the canonical `LPMPassName` key BEFORE dlt
+# ever sees the record, so post-fix only `jdl__lpm_pass_name` should exist.
+# This gate now asserts BOTH sides: the merged column present AND the
+# split-casing column absent, so a regression in either direction (merge
+# stops working, or a future dlt/schema change reintroduces the split)
+# fails the gate rather than passing silently.
 INGEST_IMAGE=$(yq -r '.images.ingest' chart/values.yaml)
 kubectl -n argo-workflows delete pod iceberg-contents-probe --ignore-not-found >/dev/null 2>&1
 cat <<PODYAML | kubectl -n argo-workflows apply -f -
@@ -225,10 +231,11 @@ spec:
               sys.exit(1)
           cols = [f.name for f in catalog.load_table("alice.mon_jdls_parsed").schema().fields]
           print("mon_jdls_parsed columns:", cols)
-          needed = {"jdl__lpmpassname", "jdl__lpm_pass_name"}
-          missing = needed - set(cols)
-          if missing:
-              print(f"FAIL: missing flattened JDL columns: {missing}")
+          if "jdl__lpm_pass_name" not in cols:
+              print("FAIL: missing merged JDL column jdl__lpm_pass_name")
+              sys.exit(1)
+          if "jdl__lpmpassname" in cols:
+              print("FAIL: split-casing column jdl__lpmpassname present (LPM casing merge regression)")
               sys.exit(1)
           print("iceberg-contents-probe: OK")
 PODYAML
@@ -242,7 +249,7 @@ PROBE_LOG=$(kubectl -n argo-workflows logs iceberg-contents-probe 2>/dev/null ||
 kubectl -n argo-workflows delete pod iceberg-contents-probe --ignore-not-found >/dev/null 2>&1
 echo "$PROBE_LOG"
 if [ "$phase" = "Succeeded" ] && echo "$PROBE_LOG" | grep -q "iceberg-contents-probe: OK"; then
-  echo "iceberg contents OK (job_info >=900 rows, mon_jdls_parsed flattened JDL columns present)"
+  echo "iceberg contents OK (job_info >=900 rows, mon_jdls_parsed jdl__lpm_pass_name present and jdl__lpmpassname absent)"
 else
   echo "FAIL: iceberg-contents-probe phase=$phase"; exit 1
 fi

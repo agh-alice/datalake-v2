@@ -23,7 +23,7 @@
       "jdl_parse_ok": true,
       "has_jdl": true,
       "has_full_jdl_raw": false,
-      "jdl_lpm_key": "LPMPASSNAME",
+      "jdl_lpm_key": "LPMPassName",
       "jdl_lpm_value": "pass2"
     }
   },

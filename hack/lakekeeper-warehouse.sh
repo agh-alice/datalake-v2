@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# shellcheck source=lib/warehouse-config.sh
+. hack/lib/warehouse-config.sh
 # Idempotent bootstrap: bootstraps the Lakekeeper server (once, ever) and
 # creates the `default` warehouse backed by the in-cluster MinIO stand-in
 # (Task 1, Plan 2 -- every later ingestion task writes to this catalog).
@@ -15,7 +17,14 @@ cd "$(dirname "$0")/.."
 # Credential values never touch this host script, its logs, or the terminal:
 # they flow Secret -> pod env -> curl body entirely inside the cluster.
 kubectl -n minio delete pod lakekeeper-warehouse-bootstrap --ignore-not-found >/dev/null 2>&1
-cat <<'PODYAML' | kubectl -n minio apply -f -
+# PODYAML stays single-quoted (fully literal) so every $var referenced by
+# the pod's OWN embedded shell script ($ROOTUSER, $LK, $AUTH, $CODE, ...)
+# is left for that script's runtime, not expanded by this host shell. The
+# two host-side constants below (shared with hack/kind-up.sh via
+# hack/lib/warehouse-config.sh -- review fix, Task 3) are injected instead
+# via a sed pass over placeholder tokens, which keeps the heredoc's
+# quoting/escaping simple and avoids touching the runtime pod variables.
+cat <<'PODYAML' | sed "s|__WAREHOUSE_BUCKET__|${WAREHOUSE_BUCKET}|g; s|__WAREHOUSE_KEY_PREFIX__|${WAREHOUSE_KEY_PREFIX}|g" | kubectl -n minio apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
@@ -83,7 +92,7 @@ spec:
             # verified against the live /api-docs/management/v1/openapi.json
             # on this deployment, not from docs/memory (chart 0.11.0 vs
             # newest docs can and do disagree -- see Task 4 lesson).
-            BODY=$(printf '{"warehouse-name":"default","storage-profile":{"type":"s3","bucket":"warehouse","key-prefix":"lakekeeper-warehouse","endpoint":"http://minio.minio.svc:9000","region":"local-01","path-style-access":true,"flavor":"s3-compat","sts-enabled":true},"storage-credential":{"type":"s3","credential-type":"access-key","access-key-id":"%s","secret-access-key":"%s"},"delete-profile":{"type":"hard"}}' "$ROOTUSER" "$ROOTPASS")
+            BODY=$(printf '{"warehouse-name":"default","storage-profile":{"type":"s3","bucket":"__WAREHOUSE_BUCKET__","key-prefix":"__WAREHOUSE_KEY_PREFIX__","endpoint":"http://minio.minio.svc:9000","region":"local-01","path-style-access":true,"flavor":"s3-compat","sts-enabled":true},"storage-credential":{"type":"s3","credential-type":"access-key","access-key-id":"%s","secret-access-key":"%s"},"delete-profile":{"type":"hard"}}' "$ROOTUSER" "$ROOTPASS")
             WCODE=$(curl -s -o /tmp/whcreate.json -w '%{http_code}' -X POST "$LK/management/v1/warehouse" \
               -H "Content-Type: application/json" -H "$AUTH" -d "$BODY")
             if [ "$WCODE" != "201" ]; then

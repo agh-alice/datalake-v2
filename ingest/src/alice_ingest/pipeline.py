@@ -25,13 +25,25 @@ Env-var contract (brief, Task 2 Interfaces):
                          non-empty string satisfies the S3 SDK -- documented
                          here rather than silently hardcoded)
 
-Watermark note (mon_jdls): the gen-1 schema (research/2026-07-12_ml-consumer-
-data-contract.md; Task 3's fixture reproduces it) has no `last_update` column
-on the raw `mon_jdls` table -- only `job_info` and `trace` carry it. `job_id`
-is monotonically increasing in the source system, so incremental extraction
-on `job_id` (instead of a timestamp cursor) is the correct and only viable
-watermark for this table. Recorded per the brief's explicit instruction to
-document this choice.
+Watermark note (per-table, corrected against production ground truth --
+research/2026-07-12_ml-consumer-data-contract.md, "Production schema ground
+truth", verified live against information_schema on mon_data 2026-07-12):
+
+  - `job_info`: HAS `last_update`, but production's column is
+    `timestamp WITHOUT time zone` (naive), not `timestamptz`. The incremental
+    initial value must therefore be a NAIVE `pendulum.naive(...)` literal --
+    a tz-aware literal pushed down against a naive column forces a
+    session-timezone cast in the SQL comparison, silently shifting the
+    cursor (the mirror-image bug of the one fixed in a610069, which was for
+    a timestamptz column).
+  - `trace`: has NO `last_update` column in production (an earlier fixture
+    incorrectly added one; corrected in Task 3's review). Its incremental
+    cursor is `laststatuschangetimestamp` (bigint epoch), initial_value=0.
+  - `mon_jdls`: no `last_update` column either. `job_id` is monotonically
+    increasing in the source system, so incremental extraction on `job_id`
+    (instead of a timestamp cursor) is the correct and only viable watermark
+    for this table. Recorded per the brief's explicit instruction to
+    document this choice.
 """
 
 from __future__ import annotations
@@ -139,26 +151,52 @@ def configure_dlt(env: Mapping[str, str]) -> None:
     dlt.config["destination.filesystem.iceberg_use_catalog_purge"] = False
 
 
-def build_job_info_trace_source(pg_url: str):
-    """job_info + trace: connectorx backend (fast, columnar; no per-row transform needed)."""
+def build_job_info_source(pg_url: str):
+    """job_info: connectorx backend (fast, columnar; no per-row transform needed).
+
+    Incremental cursor is `last_update`. Production's column is `timestamp
+    WITHOUT time zone` (naive) -- research/2026-07-12_ml-consumer-data-
+    contract.md, "Production schema ground truth" (verified live against
+    information_schema on mon_data). `pendulum.naive(...)` (naive factory),
+    NOT the tz-aware `pendulum.datetime(...)`: an aware literal pushed down
+    against a naive `timestamp` column forces a session-timezone cast in the
+    SQL comparison, which silently shifts the incremental cursor.
+    """
     source = sql_database(
         credentials=pg_url, backend="connectorx", chunk_size=100_000
-    ).with_resources("job_info", "trace")
-    for resource_name in ("job_info", "trace"):
-        getattr(source, resource_name).apply_hints(
-            incremental=dlt.sources.incremental(
-                # pendulum.datetime(...) (tz-aware UTC factory), not the
-                # naive pendulum.DateTime(...) constructor: a naive literal
-                # gets session-TimeZone-cast when pushed down against a
-                # timestamptz column in SQL, which silently shifts the
-                # incremental cursor.
-                "last_update", initial_value=pendulum.datetime(2026, 1, 1)
-            ),
-            primary_key="job_id",
-            write_disposition={"disposition": "merge", "strategy": "upsert"},
-            schema_contract={"columns": "evolve", "data_type": "freeze"},
-            table_format="iceberg",
-        )
+    ).with_resources("job_info")
+    source.job_info.apply_hints(
+        incremental=dlt.sources.incremental(
+            "last_update", initial_value=pendulum.naive(2026, 1, 1)
+        ),
+        primary_key="job_id",
+        write_disposition={"disposition": "merge", "strategy": "upsert"},
+        schema_contract={"columns": "evolve", "data_type": "freeze"},
+        table_format="iceberg",
+    )
+    return source
+
+
+def build_trace_source(pg_url: str):
+    """trace: connectorx backend. Production has NO `last_update` column on
+    `trace` (research/2026-07-12_ml-consumer-data-contract.md, "Production
+    schema ground truth" -- all 18 production columns enumerated there, none
+    named `last_update`; an earlier fixture incorrectly added one, corrected
+    in Task 3's review). Incremental cursor is `laststatuschangetimestamp`
+    (bigint epoch, not a timestamp type), initial_value=0.
+    """
+    source = sql_database(
+        credentials=pg_url, backend="connectorx", chunk_size=100_000
+    ).with_resources("trace")
+    source.trace.apply_hints(
+        incremental=dlt.sources.incremental(
+            "laststatuschangetimestamp", initial_value=0
+        ),
+        primary_key="job_id",
+        write_disposition={"disposition": "merge", "strategy": "upsert"},
+        schema_contract={"columns": "evolve", "data_type": "freeze"},
+        table_format="iceberg",
+    )
     return source
 
 
@@ -197,8 +235,12 @@ def run_nightly(env: Mapping[str, str] | None = None) -> int:
         dataset_name=DATASET_NAME,
     )
 
-    job_info_trace_source = build_job_info_trace_source(pg_url)
-    load_info = pipeline.run(job_info_trace_source)
+    job_info_source = build_job_info_source(pg_url)
+    load_info = pipeline.run(job_info_source)
+    print(load_info)
+
+    trace_source = build_trace_source(pg_url)
+    load_info = pipeline.run(trace_source)
     print(load_info)
 
     mon_jdls_resource = build_mon_jdls_resource(pg_url)

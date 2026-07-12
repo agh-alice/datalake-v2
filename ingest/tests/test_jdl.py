@@ -148,3 +148,57 @@ class TestParseJdlFixtureDriven:
 
     def test_fixture_has_at_least_four_samples(self):
         assert len(FIXTURES) >= 4
+
+
+class TestLpmCasingMergeAtIngestion:
+    """LPMPassName/LPMPASSNAME casing must be coalesced into the canonical
+    `LPMPassName` key at ingestion (design spec section 4, deliverables/
+    2026-07-12-datalake-v2-design.md: "Fixed at ingestion rather than in the
+    consumer: ... LPMPassName/LPMPASSNAME casing"). gen-1 merged these; the
+    ML consumer's dtypes contract (research/2026-07-12_ml-consumer-data-
+    contract.md) expects a single field, not a case-split pair.
+    """
+
+    def test_only_uppercase_variant_present_is_coalesced_to_canonical_key(self):
+        record = {
+            "job_id": 2001,
+            "full_jdl": '{"TTL": "3600", "LPMPASSNAME": "passU"}',
+        }
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["LPMPassName"] == "passU"
+        assert "LPMPASSNAME" not in result["jdl"]
+
+    def test_only_canonical_variant_present_is_unchanged(self):
+        record = {
+            "job_id": 2002,
+            "full_jdl": '{"TTL": "3600", "LPMPassName": "passC"}',
+        }
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["LPMPassName"] == "passC"
+        assert "LPMPASSNAME" not in result["jdl"]
+
+    def test_both_present_null_canonical_nonnull_variant_nonnull_wins(self):
+        record = {
+            "job_id": 2003,
+            "full_jdl": '{"TTL": "3600", "LPMPassName": null, "LPMPASSNAME": "passN"}',
+        }
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["LPMPassName"] == "passN"
+        assert "LPMPASSNAME" not in result["jdl"]
+
+    def test_both_present_null_variant_nonnull_canonical_nonnull_wins(self):
+        record = {
+            "job_id": 2004,
+            "full_jdl": '{"TTL": "3600", "LPMPassName": "passC2", "LPMPASSNAME": null}',
+        }
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["LPMPassName"] == "passC2"
+        assert "LPMPASSNAME" not in result["jdl"]
