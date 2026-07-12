@@ -16,7 +16,7 @@ spec:
           requests: {cpu: 100m, memory: 256Mi}
           limits: {memory: 512Mi}
         monitoring:
-          podMonitorEnabled: false   # true in Task 6
+          podMonitorEnabled: true
   destination: {server: https://kubernetes.default.svc, namespace: cnpg-system}
   syncPolicy:
     automated: {prune: true, selfHeal: true}

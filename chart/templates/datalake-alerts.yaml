@@ -1,0 +1,68 @@
+# Design D11 — failure-derived alert set (E4/E5/E2). Plan 2 appends
+# workflow/staleness alerts to this same PrometheusRule group.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: datalake-alerts
+  namespace: monitoring
+spec:
+  groups:
+    - name: datalake
+      rules:
+        - alert: LandingDBXidAgeHigh
+          expr: max(cnpg_pg_database_xid_age) > 1000000000
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: Landing DB transaction-ID age approaching wraparound
+            description: >-
+              cnpg_pg_database_xid_age has exceeded 1e9 for 30m. Unmitigated,
+              this repeats E4 -- the landing DB hit transaction-ID
+              wraparound protection and refused all writes for two months,
+              unnoticed, because orphaned temp tables pinned the frozen-XID
+              horizon.
+            incident: E4
+            runbook_url: docs/runbooks/xid-wraparound.md
+
+        - alert: CNPGClusterUnhealthy
+          expr: cnpg_pg_replication_streaming_replicas < 1
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: CNPG cluster has no streaming replicas
+            description: >-
+              cnpg_pg_replication_streaming_replicas has been below 1 for
+              15m -- HA is degraded to a single instance. E5 was the
+              RAID0-over-4-volumes VM with zero redundancy that CNPG
+              replaces.
+            incident: E5
+
+        - alert: NodeDiskPressure
+          expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.2
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Node filesystem below 20% free
+            description: >-
+              A node filesystem has had less than 20% free space for 30m.
+              E5 included a root disk left 100% full by one unrotated
+              27GB Docker log, unnoticed until someone asked where the
+              data was.
+            incident: E5
+
+        - alert: ArgoAppOutOfSync
+          expr: argocd_app_info{sync_status!="Synced"} == 1
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: ArgoCD Application out of sync for over an hour
+            description: >-
+              argocd_app_info reports sync_status != Synced for 1h -- the
+              live cluster no longer matches the tracked Git source. E2 was
+              exactly this class of silent drift: a Dec-2023 image running
+              in production instead of the repo's code.
+            incident: E2

@@ -6,16 +6,22 @@ namespaces:
   - lakekeeper
   - landing-db
 
+# enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
+# chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
+# field deprecated ("will be removed in an upcoming release") but it is
+# still present and functional in the CRD schema (verified via `kubectl
+# explain cluster.spec.monitoring.enablePodMonitor`, Task 6) -- used as-is;
+# switch to hand-authored PodMonitor resources if a future CNPG bump drops it.
 lakekeeperDb:
   instances: 2
   storageSize: 5Gi
-  enablePodMonitor: false   # true in Task 6
+  enablePodMonitor: true
 
 landingDb:
   instances: 3
   storageSize: 50Gi
   maxConnections: "60"
-  enablePodMonitor: false   # true in Task 6
+  enablePodMonitor: true
 
 # Lakekeeper's Postgres secret-store encryption key lives in Secret
 # lakekeeper/lakekeeper-pg-encryption -- created by hack/kind-up.sh on kind

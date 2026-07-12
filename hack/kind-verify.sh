@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper external-secrets)   # extended by later tasks
+EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper external-secrets monitoring)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -62,5 +62,14 @@ if echo "$REST_CODE" | grep -qE "^[234]"; then
   echo "lakekeeper REST endpoint reachable"
 else
   echo "FAIL: lakekeeper REST endpoint unreachable (got: '$REST_CODE')"; exit 1
+fi
+# Hard gate (probe pattern per Task 2/3 reviews) — Prometheus STS name is
+# discovered by label, never hardcoded (chart-generated name can change).
+PROM_STS=$(kubectl -n monitoring get sts -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}')
+if kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
+     wget -qO- 'http://localhost:9090/api/v1/rules' | grep -q LandingDBXidAgeHigh; then
+  echo "alert rules loaded"
+else
+  echo "FAIL: datalake alert rules not loaded in Prometheus"; exit 1
 fi
 echo "kind-verify: all applications Synced/Healthy"
