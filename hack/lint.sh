@@ -11,5 +11,13 @@ for env in kind cyfronet; do
   helm template datalake chart/ -f chart/values.yaml -f "chart/values-$env.yaml" --include-crds | kubeconform "${KC_FLAGS[@]}" -
 done
 echo "== kubeconform: Application/AppProject manifests =="
-kubeconform "${KC_FLAGS[@]}" apps/ environments/kind/apps/ environments/cyfronet/apps/ 2>/dev/null || true
+# Skip only directories that don't exist yet (git tracks no empty dirs);
+# real validation errors MUST fail the lint (review finding, Task 1).
+APP_DIRS=()
+for d in apps environments/kind/apps environments/cyfronet/apps; do
+  [ -d "$d" ] && compgen -G "$d/*.yaml" >/dev/null && APP_DIRS+=("$d")
+done
+if [ "${#APP_DIRS[@]}" -gt 0 ]; then
+  kubeconform "${KC_FLAGS[@]}" "${APP_DIRS[@]}"
+fi
 echo "lint OK"
