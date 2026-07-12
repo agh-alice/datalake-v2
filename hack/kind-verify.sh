@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-EXPECTED_APPS=(datalake-kind cloudnative-pg)   # extended by later tasks
+EXPECTED_APPS=(datalake-kind cloudnative-pg lakekeeper)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -24,5 +24,14 @@ if git ls-remote --heads origin | grep -q 'refs/heads/environments/kind$'; then
   echo "hydrated branch environments/kind exists"
 else
   echo "FAIL: hydrated branch environments/kind missing on origin"; exit 1
+fi
+# Hard gate: the probe must actually gate (Task 2/3 review pattern). A 4xx on the
+# unconfigured-warehouse query is acceptable proof of liveness; connection failure is not.
+if kubectl -n lakekeeper run rest-probe --rm -i --restart=Never --image=curlimages/curl -- \
+     sh -c 'curl -s -o /dev/null -w "%{http_code}" http://lakekeeper.lakekeeper.svc:8181/catalog/v1/config?warehouse=none' \
+     | grep -qE "^[234]"; then
+  echo "lakekeeper REST endpoint reachable"
+else
+  echo "FAIL: lakekeeper REST endpoint unreachable"; exit 1
 fi
 echo "kind-verify: all applications Synced/Healthy"

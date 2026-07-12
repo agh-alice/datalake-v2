@@ -1,0 +1,10 @@
+{{- if .Values.lakekeeperPgEncryptionKey }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lakekeeper-pg-encryption
+  namespace: lakekeeper
+type: Opaque
+stringData:
+  encryptionKey: {{ .Values.lakekeeperPgEncryptionKey | quote }}
+{{- end }}

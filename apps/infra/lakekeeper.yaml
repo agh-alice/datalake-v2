@@ -1,0 +1,46 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: lakekeeper
+  namespace: argocd
+  annotations: {argocd.argoproj.io/sync-wave: "2"}
+spec:
+  project: datalake
+  source:
+    repoURL: https://lakekeeper.github.io/lakekeeper-charts/
+    chart: lakekeeper
+    targetRevision: "0.11.0"
+    helm:
+      valuesObject:
+        # Actual chart schema (0.11.0, appVersion 0.12.2) differs from the
+        # brief's URI-based invariant -- see task-4-report.md for details.
+        # Bundled `groundhog2k/postgres` subchart disabled; DB config uses
+        # discrete host/port/database (plain values; not sensitive) plus
+        # user/password sourced from the CNPG secret `lakekeeper-db-app`.
+        postgresql:
+          enabled: false
+        externalDatabase:
+          type: postgres
+          host_read: lakekeeper-db-rw.lakekeeper.svc
+          host_write: lakekeeper-db-rw.lakekeeper.svc
+          port: 5432
+          database: lakekeeper
+          userSecret: lakekeeper-db-app
+          userSecretKey: username
+          passwordSecret: lakekeeper-db-app
+          passwordSecretKey: password
+        # secretBackend.type defaults to "Postgres" (Lakekeeper's internal
+        # secret store, distinct from the catalog DB above). It needs an
+        # encryption key; the chart auto-generates one via helm `lookup`,
+        # which is incompatible with ArgoCD (chart's own values.yaml warns of
+        # this, citing argoproj/argo-cd#5202). We pre-create the Secret
+        # ourselves in chart/templates/lakekeeper-pg-encryption.yaml
+        # (inline value for kind only; cyfronet uses an ExternalSecret).
+        secretBackend:
+          postgres:
+            encryptionKeySecret: lakekeeper-pg-encryption
+            encryptionKeySecretKey: encryptionKey
+  destination: {server: https://kubernetes.default.svc, namespace: lakekeeper}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true]
