@@ -15,20 +15,19 @@ namespaces:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29198121784
-# (commit 1e94a8c, ingest-image workflow, rebuild for the review
-# critical/important fixes: real trace epoch-unit provenance [live
-# production sample, not the brief], a pre-delete plausibility guard on
-# trace, and mon_jdls's INNER JOIN -> LEFT JOIN orphan-eligibility fix --
-# the prior pin (sha256:f4747a64...) predates all three); verified
-# resolvable via the GHCR registry API (`GET /v2/agh-alice/datalake-v2-
-# ingest/manifests/<digest>` with an anonymous pull token) -- an index
-# manifest wrapping the linux/amd64 image + its attestation manifest,
-# matching the previous pin's structure. Consumed by
-# chart/templates/ingest-cronworkflows.yaml (Task 4).
+# reviewable in the rendered-branch diff. Pinned from CI run 29199201066
+# (commit f207136, ingest-image workflow, Plan 2 Task 5: adds
+# alice_ingest/maintenance.py -- run-maintenance's CronWorkflow now has real
+# code to execute instead of pipeline.py's "not implemented yet" stub -- and
+# sitesonar.py's high-water-mark file skip; the prior pin
+# [sha256:170b6ca6...] predates both); verified resolvable via the GHCR
+# registry API (`GET /v2/agh-alice/datalake-v2-ingest/manifests/<digest>`
+# with an anonymous pull token, HTTP 200) -- same index-manifest structure
+# as the previous pin. Consumed by chart/templates/ingest-cronworkflows.yaml
+# (Task 4 nightly/sitesonar, Task 5 maintenance).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:170b6ca6016a083179af912f87ccde7aa222624be343603ec0e898f29d4b699d"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:1590e55137b8f0d1e270b9e465a34e7614c5bbb4d89f0d532eb61cd31653b935"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
