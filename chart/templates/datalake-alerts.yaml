@@ -125,19 +125,38 @@ spec:
     # cluster) was checked too and exposes nothing for the Workflow/
     # CronWorkflow CRDs -- ruling out the brief's hypothesized
     # "kube_job-style" fallback.
+    #
+    # exported_namespace, not namespace (found live, via Prometheus's own
+    # /api/v1/query, after the rules first loaded -- not assumed): the
+    # controller's ServiceMonitor (chart/templates in argo-workflows,
+    # `honorLabels: false`, the chart default) makes Prometheus's own
+    # scrape-target namespace win the plain `namespace` label, renaming the
+    # SCRAPED METRIC's own `namespace="argo-workflows"` value (the
+    # workflow's namespace -- what these alerts actually need) to
+    # `exported_namespace`. On this cluster the controller pod happens to
+    # run in the same namespace as the workflows it manages, so both labels
+    # currently read "argo-workflows" and a plain `namespace=` filter would
+    # have silently worked BY COINCIDENCE; every expr below uses
+    # `exported_namespace` deliberately so it stays correct if that ever
+    # changes (e.g. a cluster-scoped controller install, or workflows
+    # spread across namespaces).
     - name: datalake-pipeline
       rules:
         - alert: WorkflowFailed
-          expr: increase(argo_workflows_total_count{namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
           for: 5m
           labels:
             severity: warning
           annotations:
             summary: An Argo Workflow in argo-workflows entered Failed/Error in the last hour
             description: >-
-              argo_workflows_total_count{namespace,phase} is a per-namespace,
-              per-phase COUNTER (verified live against the controller's own
-              /metrics, 2026-07-12) -- increase() over 1h counts workflows
+              argo_workflows_total_count{exported_namespace,phase} is a
+              per-namespace, per-phase COUNTER (verified live against the
+              controller's own /metrics AND against Prometheus's own stored
+              series, 2026-07-12 -- see this group's header comment on why
+              `exported_namespace`, not the scraped `namespace` label,
+              carries the workflow's actual namespace) -- increase() over 1h
+              counts workflows
               that TRANSITIONED into Failed or Error during that window,
               which is what "entering Failed/Error in the last hour" means;
               a gauge read (argo_workflows_gauge, also present but with NO
@@ -162,7 +181,7 @@ spec:
             incident: E1
 
         - alert: IcebergIngestStale
-          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-nightly", namespace="argo-workflows"}[26h]) == 0
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-nightly", exported_namespace="argo-workflows"}[26h]) == 0
           for: 5m
           labels:
             severity: critical
@@ -194,7 +213,7 @@ spec:
             incident: E4
 
         - alert: RetentionUnverifiedRows
-          expr: increase(argo_workflows_total_count{namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
           for: 5m
           labels:
             severity: warning
