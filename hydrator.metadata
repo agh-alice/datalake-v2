@@ -1,8 +1,7 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "b5e74bd8713493bc32b185b9cf1c7714ada94185",
+  "drySha": "a0615934a883c12b9843baa5ec8b15e24bfa3fa6",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T01:06:45Z",
-  "subject": "feat: ArgoCD source-hydrator bootstrap, scoped AppProject, datalake-kind app",
-  "body": "Pins argo/argo-cd chart 10.1.3 (newest published chart at execution time)\nwith global.image.tag=v3.5.0-rc2 override: no argo-helm chart bundles\nArgoCD >=v3.5 yet (GA hasn't shipped, only rc1/rc2), and the Source\nHydrator needs the v3.5 beta-stability line (timeout/requeue fixes) per\nthe GAUGE report's floor. commitServer.enabled is confirmed as the\ncorrect values key for this chart version.\n\nAppProject datalake is scoped to the repo + the five Helm chart repos\nthis platform will use; Application datalake-kind hydrates chart/ to\nbranch environments/kind via the commit-server, using a write-capable\nrepo credential so the hydrator can push rendered manifests.\n"
+  "date": "2026-07-12T01:49:23Z",
+  "subject": "feat: CNPG operator and lakekeeper-db cluster"
 }
