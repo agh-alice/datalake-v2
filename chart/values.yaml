@@ -27,7 +27,7 @@ namespaces:
 # Task 5 maintenance).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:388dd986af8e8f9821ff57ba71cd084d641b814f6c7080204b10ca8071191399"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:131fc3e9d6823c6e82e57e6b8008c0baa764a01f6a012afe9a8c6399c3e1f20e"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
