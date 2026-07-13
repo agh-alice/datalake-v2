@@ -25,7 +25,14 @@ set -euo pipefail
 # creates the Cluster as soon as the chart's manifests land, regardless of
 # the parent Application's own health rollup) -- datalake-kind itself still
 # has to stay last for the reason in the note above.
-EXPECTED_APPS=(cloudnative-pg external-secrets monitoring minio lakekeeper argo-workflows trino datalake-kind)   # extended by later tasks
+# dex (Plan 4 Task T1S4, D-Dex) inserted before monitoring: Grafana's OIDC
+# wiring (apps/infra/monitoring.yaml) depends on Dex's issuer + the shared
+# client-secret Secret being up, so it reads naturally checked first here --
+# same "convergence is eventual, not ordered" caveat as every other entry
+# in this array (this file's own header comment): EXPECTED_APPS's check
+# ORDER doesn't mechanically enforce sync order, only makes the verify
+# loop's early failures more likely to be meaningful.
+EXPECTED_APPS=(cloudnative-pg external-secrets dex monitoring minio lakekeeper argo-workflows trino datalake-kind)   # extended by later tasks
 for app in "${EXPECTED_APPS[@]}"; do
   for i in $(seq 1 60); do
     sync=$(kubectl -n argocd get application "$app" -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
@@ -51,6 +58,77 @@ for i in $(seq 1 20); do
   [ "$i" = 20 ] && { echo "FAIL: hydrator stale or dead (drySHA=$DRY_SHA main=$MAIN_SHA)"; exit 1; }
   sleep 15
 done
+# Hard gate (Plan 4 Task T1S4, design D-Dex): the OIDC discovery endpoint
+# must actually resolve -- proves Dex is up and correctly serving its
+# issuer, not just that the Application rolled up Healthy (a Dex pod can be
+# Running/Ready per its own k8s probes yet still be misconfigured in a way
+# that only shows up when something actually queries the OIDC surface).
+# Same create/poll/logs/delete throwaway-pod pattern as every other probe
+# in this file (Task 2/3 review: a non-TTY `kubectl run --rm -i` can drop
+# the attached stdout).
+kubectl -n dex delete pod oidc-discovery-probe --ignore-not-found >/dev/null 2>&1
+kubectl -n dex run oidc-discovery-probe --restart=Never --image=curlimages/curl -- \
+  sh -c 'curl -s http://dex.dex.svc.cluster.local:5556/dex/.well-known/openid-configuration' >/dev/null
+for i in $(seq 1 30); do
+  phase=$(kubectl -n dex get pod oidc-discovery-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 2
+done
+OIDC_DISCOVERY=$(kubectl -n dex logs oidc-discovery-probe 2>/dev/null || echo "")
+kubectl -n dex delete pod oidc-discovery-probe --ignore-not-found >/dev/null 2>&1
+if echo "$OIDC_DISCOVERY" | grep -q '"issuer"' && echo "$OIDC_DISCOVERY" | grep -q '"authorization_endpoint"'; then
+  echo "dex OIDC discovery endpoint resolves"
+else
+  echo "FAIL: dex OIDC discovery endpoint did not resolve (got: '$OIDC_DISCOVERY')"; exit 1
+fi
+# Hard gate (Plan 4 Task T1S4): Grafana must offer the Dex OAuth login
+# option AND local-admin login/API access must keep working -- OIDC is
+# additive on kind, not a replacement (see apps/infra/monitoring.yaml's
+# comment). Grafana's `/login` HTML embeds a bootData script tag
+# containing `"oauth":{"generic_oauth":{...}}` once
+# auth.generic_oauth.enabled is true (verified live against this cluster's
+# actual rendered page, not assumed from docs) -- grep for the provider
+# name set in apps/infra/monitoring.yaml's grafana.ini (`"name":"Dex"`)
+# rather than the bare string "generic_oauth", which also appears in
+# unrelated static JS bundle references on the same page. Local-admin
+# proof: the same Secret <release>-grafana admin-user/admin-password this
+# Application already generates, hit against the real HTTP Basic auth
+# `/api/user` endpoint.
+GRAFANA_ADMIN_USER=$(kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-user}' | base64 -d)
+GRAFANA_ADMIN_PASSWORD=$(kubectl -n monitoring get secret monitoring-grafana -o jsonpath='{.data.admin-password}' | base64 -d)
+kubectl -n monitoring delete pod grafana-oidc-probe --ignore-not-found >/dev/null 2>&1
+cat <<PODYAML | kubectl -n monitoring apply -f -
+apiVersion: v1
+kind: Pod
+metadata:
+  name: grafana-oidc-probe
+spec:
+  restartPolicy: Never
+  containers:
+    - name: probe
+      image: curlimages/curl
+      command:
+        - sh
+        - -c
+        - |
+          echo "===LOGIN_PAGE==="
+          curl -s http://monitoring-grafana.monitoring.svc/login
+          echo "===LOCAL_ADMIN_API==="
+          curl -s -u '$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD' http://monitoring-grafana.monitoring.svc/api/user
+PODYAML
+phase=""
+for i in $(seq 1 30); do
+  phase=$(kubectl -n monitoring get pod grafana-oidc-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 2
+done
+GRAFANA_PROBE_LOG=$(kubectl -n monitoring logs grafana-oidc-probe 2>/dev/null || echo "")
+kubectl -n monitoring delete pod grafana-oidc-probe --ignore-not-found >/dev/null 2>&1
+if echo "$GRAFANA_PROBE_LOG" | grep -q '"name":"Dex"' && echo "$GRAFANA_PROBE_LOG" | grep -q '"login":"admin"'; then
+  echo "grafana OIDC login option present + local-admin login/API still works"
+else
+  echo "FAIL: grafana OIDC/local-admin proof failed (got: '$GRAFANA_PROBE_LOG')"; exit 1
+fi
 # Hard gate (probe pattern per Task 2/3 reviews: soft `A && echo` falls through under set -e)
 # Primary resolved via currentPrimary (Task 3 review Minor: never pin -1; failover breaks it)
 LK_PRIMARY=$(kubectl -n lakekeeper get cluster lakekeeper-db -o jsonpath='{.status.currentPrimary}')
@@ -132,15 +210,75 @@ fi
 # whichever group happened to already be present before Task 5.
 # Extended again (Plan 3 Task 3): IcebergSnapshotStale (the data-layer
 # freshness gate's alert, design D11 completion) must load alongside them.
+# Extended again (Plan 4 Task T2S1): WorkflowChronicFailure (the E1-streak
+# escalation), SiteSonarStale and IcebergMaintenanceStale (the sitesonar/
+# maintenance trigger-staleness follow-up) must load too.
 PROM_STS=$(kubectl -n monitoring get sts -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}')
 RULES_JSON=$(kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
      wget -qO- 'http://localhost:9090/api/v1/rules')
 if echo "$RULES_JSON" | grep -q LandingDBXidAgeHigh && echo "$RULES_JSON" | grep -q WorkflowFailed \
-   && echo "$RULES_JSON" | grep -q IcebergSnapshotStale; then
-  echo "alert rules loaded (datalake + datalake-pipeline groups, incl. IcebergSnapshotStale)"
+   && echo "$RULES_JSON" | grep -q IcebergSnapshotStale && echo "$RULES_JSON" | grep -q WorkflowChronicFailure \
+   && echo "$RULES_JSON" | grep -q SiteSonarStale && echo "$RULES_JSON" | grep -q IcebergMaintenanceStale; then
+  echo "alert rules loaded (datalake + datalake-pipeline groups, incl. IcebergSnapshotStale/WorkflowChronicFailure/SiteSonarStale/IcebergMaintenanceStale)"
 else
-  echo "FAIL: datalake alert rules not loaded in Prometheus (LandingDBXidAgeHigh and/or WorkflowFailed and/or IcebergSnapshotStale missing)"; exit 1
+  echo "FAIL: datalake alert rules not loaded in Prometheus (one or more of LandingDBXidAgeHigh/WorkflowFailed/IcebergSnapshotStale/WorkflowChronicFailure/SiteSonarStale/IcebergMaintenanceStale missing)"; exit 1
 fi
+# Hard gate (Plan 4 Task T2S1 prework): fire a synthetic always-firing
+# PrometheusRule end-to-end through the real pipeline -- Prometheus evals it
+# -> Alertmanager groups/routes it to the `slack-datalake` receiver -> the
+# receiver POSTs to echo-receiver (chart/templates/echo-receiver.yaml) ->
+# the POST body lands in `kubectl logs`. Proves the whole chain
+# apps/infra/monitoring.yaml wires (route group_by/group_wait, the
+# `slack-datalake` receiver, the Secret-mounted api_url_file) actually
+# works, not just that each piece's config parses. Throwaway
+# PrometheusRule + probe pod, same create/verify/delete pattern as every
+# other probe in this file; removed unconditionally on the way out (trap)
+# so a failed gate doesn't leave a permanent always-firing alert behind.
+SYNTH_RULE_CLEANUP() { kubectl -n monitoring delete prometheusrule kind-verify-synthetic-alert --ignore-not-found >/dev/null 2>&1; }
+trap SYNTH_RULE_CLEANUP EXIT
+kubectl -n monitoring apply -f - <<'RULEYAML'
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kind-verify-synthetic-alert
+  namespace: monitoring
+spec:
+  groups:
+    - name: kind-verify-synthetic
+      rules:
+        - alert: KindVerifySyntheticAlert
+          expr: vector(1) > 0
+          labels: {severity: warning}
+          annotations: {summary: "kind-verify synthetic alert -- always firing, removed at the end of this gate"}
+RULEYAML
+# group_wait (30s) + a Prometheus eval cycle + Alertmanager's own dispatch
+# need real wall-clock time before the receiver actually POSTs -- poll the
+# echo-receiver pod's logs rather than a single fixed sleep.
+ECHO_POD=""
+for i in $(seq 1 30); do
+  ECHO_POD=$(kubectl -n monitoring get pod -l app=echo-receiver -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+  [ -n "$ECHO_POD" ] && [ "$(kubectl -n monitoring get pod "$ECHO_POD" -o jsonpath='{.status.phase}' 2>/dev/null)" = "Running" ] && break
+  sleep 5
+done
+[ -z "$ECHO_POD" ] && { echo "FAIL: echo-receiver pod not found/Running"; exit 1; }
+SYNTH_OK=""
+for i in $(seq 1 24); do
+  ECHO_LOG=$(kubectl -n monitoring logs "$ECHO_POD" 2>/dev/null || echo "")
+  if echo "$ECHO_LOG" | grep -q KindVerifySyntheticAlert; then
+    SYNTH_OK=1
+    break
+  fi
+  sleep 10
+done
+if [ -n "$SYNTH_OK" ] && echo "$ECHO_LOG" | grep -q 'datalake-alerts'; then
+  echo "synthetic alert reached echo-receiver end-to-end (route/group/receiver pipeline OK)"
+else
+  echo "FAIL: synthetic alert never reached echo-receiver (Alertmanager route/receiver pipeline broken) -- last echo-receiver log:"
+  echo "$ECHO_LOG"
+  exit 1
+fi
+SYNTH_RULE_CLEANUP
+trap - EXIT
 # Manual Workflow run using the same image the CronWorkflow uses (Task 7) --
 # the CronWorkflow itself ticks every 5m; this proves the pipeline-runner SA
 # + RBAC + digest-pinned image actually execute a workflow, without waiting

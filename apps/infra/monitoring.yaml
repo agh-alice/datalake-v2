@@ -12,8 +12,150 @@ spec:
     targetRevision: "83.4.0"
     helm:
       valuesObject:
-        grafana: {enabled: true}
-        alertmanager: {enabled: true}
+        grafana:
+          enabled: true
+          # Plan 4 Task T1S4 / D-Dex: OIDC against the in-cluster Dex
+          # issuer (apps/infra/dex.yaml). envFromSecret is the chart's own
+          # documented mechanism for injecting values grafana.ini can
+          # reference via `$__env{...}` expansion without ever rendering
+          # the secret value into the ConfigMap grafana.ini is stored in
+          # (verified against grafana subchart 11.6.0/values.yaml's
+          # `envFromSecret: ""` key and templates/_pod.tpl's
+          # `envFrom: [{secretRef: {name: <envFromSecret>}}]` rendering --
+          # no chart-side prefixing, the key name in the Secret becomes the
+          # env var name verbatim). Secret monitoring/dex-grafana-oauth is
+          # harness-provisioned by hack/kind-up.sh on kind (random,
+          # matching the SAME value written to dex/dex-grafana-oauth that
+          # Dex's own staticClients[0].secretEnv resolves -- see
+          # apps/infra/dex.yaml's comment).
+          envFromSecret: dex-grafana-oauth
+          "grafana.ini":
+            auth:
+              # Explicit, not just relying on the chart default: local-admin
+              # login (Secret <release>-grafana's admin-user/admin-password,
+              # unchanged by this Application) MUST keep working as a
+              # fallback per Plan 4 Task T1S4 -- OIDC is additive, not a
+              # replacement, until cyfronet's real GitHub-org gate is live.
+              disable_login_form: false
+            auth.generic_oauth:
+              enabled: true
+              name: Dex
+              client_id: grafana
+              # $__env{...} is grafana subchart 11.6.0's documented
+              # variable-expansion syntax for grafana.ini
+              # (charts/grafana/templates/_helpers.tpl's
+              # assertNoLeakedSecrets: the literal value here must match
+              # `\$(?:__(?:env|file|vault))?{[^}]+}` or the chart's own
+              # helm template call FAILS client-side -- this is a real
+              # chart-enforced gate this repo's `make lint` (helm template)
+              # already exercises, not a style preference) -- the env var
+              # itself comes from envFromSecret above, same Secret value
+              # Dex's staticClients[0] validates against.
+              client_secret: $__env{GRAFANA_OIDC_CLIENT_SECRET}
+              scopes: "openid profile email groups"
+              # In-cluster Service DNS (apps/infra/dex.yaml, ns dex, Service
+              # `dex` port 5556) -- token_url/api_url are called
+              # Grafana-server-side so in-cluster DNS is correct regardless
+              # of environment. auth_url is browser-facing; on kind (no
+              # ingress) a real interactive login needs the operator's own
+              # port-forward/hosts-file setup to resolve this name from a
+              # browser -- kind-verify's proof is therefore scoped to what's
+              # actually provable headlessly: the login page offers the
+              # OAuth option and the OIDC discovery document resolves
+              # in-cluster (hack/kind-verify.sh). Cyfronet gets a real,
+              # externally-resolvable ingress hostname here instead
+              # (TO VERIFY at Plan 4 Task 1 Step 4 execution).
+              auth_url: http://dex.dex.svc.cluster.local:5556/dex/auth
+              token_url: http://dex.dex.svc.cluster.local:5556/dex/token
+              api_url: http://dex.dex.svc.cluster.local:5556/dex/userinfo
+              allow_sign_up: true
+        alertmanager:
+          enabled: true
+          # Plan 4 Task T2S1 prework: Secret carrying the Slack webhook is
+          # mounted via alertmanagerSpec.secrets (verified against this
+          # cluster's live monitoring.coreos.com/v1 Alertmanager CRD --
+          # `kubectl explain alertmanager.spec.secrets`: "Each Secret is
+          # added to the StatefulSet definition as a volume... mounted into
+          # /etc/alertmanager/secrets/<secret-name>/" -- NOT the
+          # `configSecret` pattern, which is for replacing Alertmanager's
+          # entire generated config wholesale and doesn't apply here).
+          # Alertmanager >=0.24 (this cluster runs v0.32.0, verified live
+          # via the alertmanager pod's own image tag) accepts
+          # `api_url_file` on slack_configs, so the webhook value itself
+          # never has to appear in the rendered Alertmanager config Secret
+          # at all -- only a file path does. Secret
+          # monitoring/alertmanager-slack-webhook is harness-provisioned by
+          # hack/kind-up.sh: on kind it carries a PLACEHOLDER URL pointing
+          # at the in-cluster echo-receiver
+          # (chart/templates/echo-receiver.yaml, values-gated
+          # `echoReceiver.enabled`) so this entire route/group/inhibit/
+          # receiver pipeline is end-to-end testable without a real Slack
+          # workspace (hack/kind-verify.sh's synthetic-alert hard gate).
+          # Cyfronet replaces the Secret's value with a real Slack webhook
+          # via ExternalSecret once the owner provides one (G3,
+          # deliverables/plans/2026-07-13-datalake-v2-migration-plan.md) --
+          # see docs/runbooks/bootstrap-cyfronet.md's "G3 = replace webhook
+          # secret" note. No chart change needed for that swap; only how
+          # the Secret is provisioned differs, same pattern as every other
+          # credential in this repo.
+          alertmanagerSpec:
+            secrets:
+              - alertmanager-slack-webhook
+          config:
+            global:
+              resolve_timeout: 5m
+            inhibit_rules:
+              # First four rules are the kube-prometheus-stack chart's own
+              # sensible defaults (helm show values, 83.4.0) -- kept
+              # verbatim rather than dropped, since replacing `config:`
+              # wholesale (this repo's style: explicit full blocks, not
+              # partial merges) would otherwise silently lose them.
+              - source_matchers: ['severity = critical']
+                target_matchers: ['severity =~ warning|info']
+                equal: [namespace, alertname]
+              - source_matchers: ['severity = warning']
+                target_matchers: ['severity = info']
+                equal: [namespace, alertname]
+              - source_matchers: ['alertname = InfoInhibitor']
+                target_matchers: ['severity = info']
+                equal: [namespace]
+              - target_matchers: ['alertname = InfoInhibitor']
+              # Plan 4 Task T2S1: RetentionUnverifiedRows co-fires
+              # WorkflowFailed by design -- same underlying Failed/Error
+              # phase transition, identical expr (chart/templates/
+              # datalake-alerts.yaml's own extensive comment on this: "it
+              # will always co-fire with WorkflowFailed, never alone").
+              # Inhibit the generic duplicate once the more specific,
+              # runbook-linkable alert is already firing for the same
+              # namespace, so an operator sees ONE actionable alert instead
+              # of two describing the identical failure.
+              - source_matchers: ['alertname = RetentionUnverifiedRows']
+                target_matchers: ['alertname = WorkflowFailed']
+                equal: [namespace]
+            route:
+              group_by: [alertname, namespace]
+              group_wait: 30s
+              group_interval: 5m
+              repeat_interval: 4h
+              receiver: slack-datalake
+              routes:
+                # Watchdog (kube-prometheus-stack's defaultRules general.rules
+                # group, always-firing heartbeat -- verified live: this
+                # cluster's monitoring-kube-prometheus-general.rules
+                # PrometheusRule exists) stays silenced, same as the chart's
+                # own default route -- it exists to prove the Prometheus ->
+                # Alertmanager pipeline itself is alive, not to page anyone.
+                - receiver: 'null'
+                  matchers: ['alertname = "Watchdog"']
+            receivers:
+              - name: 'null'
+              - name: slack-datalake
+                slack_configs:
+                  - api_url_file: /etc/alertmanager/secrets/alertmanager-slack-webhook/webhook-url
+                    channel: '#datalake-alerts'
+                    send_resolved: true
+            templates:
+              - '/etc/alertmanager/config/*.tmpl'
         prometheus:
           prometheusSpec:
             retention: 15d

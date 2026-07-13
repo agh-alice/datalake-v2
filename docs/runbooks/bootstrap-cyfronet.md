@@ -327,3 +327,186 @@ opportunistically; do not delay bootstrap waiting for it.
 - **Property-name version-lock:** Trino 476 uses `fs.native-s3.enabled` for S3 connectivity, not `fs.s3.enabled`. The latter became the property name in later releases (≥477). When re-pinning the chart/appVersion, re-verify the exact property name against the Trino version's own docs (`https://trino.io/docs/<version>/object-storage/file-system-s3.html`), not the `/current/` doc version — Trino docs are version-specific and property names have changed. See apps/infra/trino.yaml comments for the root-cause.
 
 - **Landing-RO credentials on cyfronet:** The `landing-ro` Secret is currently harness-provisioned on kind by `hack/kind-up.sh`. On cyfronet, it is sourced via `ExternalSecret` from GCP Secret Manager (analogous to section §5's `lakekeeper-pg-encryption` pattern). Store the read-only Trino user's password in Secret Manager at project `tensile-ethos-474915-f7` under key `trino-landing-ro-password`, then apply an `ExternalSecret` to pull it into namespace `trino` as Secret name `landing-ro` (same Secret name, different provisioning). The chart's existing `envFrom.secretRef.name: landing-ro` requires no change — only how the Secret is created differs between environments.
+
+## Dex (GitHub-org OIDC) — Plan 4 notes
+
+Design decision D-Dex (`deliverables/2026-07-12-datalake-v2-design.md`, OIDC
+provider row) + migration plan Task 1 Step 4: standalone Dex
+(`apps/infra/dex.yaml`) bridges GitHub (OAuth2-only, not a full OIDC IdP) to
+every OIDC-speaking consumer in this platform (Lakekeeper, Grafana; Trino
+deferred — see below), gated on `agh-alice` org membership. **On kind**,
+`apps/infra/dex.yaml` deploys with the zero-setup `mockCallback` connector
+instead — a real GitHub OAuth App requires owner action in the GitHub org
+UI that cannot be done from this session (or any automated one). Everything
+below is what changes to go from kind's mock-connector proof to cyfronet's
+real GitHub-org gate.
+
+### 1. Create the GitHub OAuth App (owner action, cannot be scripted)
+
+In the `agh-alice` GitHub org: **Settings → Developer settings → OAuth
+Apps → New OAuth App**.
+
+- Homepage URL / Authorization callback URL: `https://<dex-hostname>/dex/callback`
+  (the real ingress hostname once cyfronet has one — TO VERIFY, no ingress
+  controller is chosen yet as of this writing).
+- Record the generated **Client ID** and **Client Secret** — the secret is
+  shown once only.
+
+### 2. Client secret via ESO, NOT a Git-tracked value
+
+Unlike Grafana's `staticClients[].secretEnv` (kind: `apps/infra/dex.yaml`'s
+comment — `idEnv`/`secretEnv` are dedicated per-field env-var references,
+verified against `dexidp/dex`'s `storage/storage.go` `Client` struct,
+shipped since Dex v2.35.0), **connector** config (the `github` connector's
+`clientSecret`) has NO equivalent env-var-reference field — verified
+against `connector/github/github.go`'s `Config` struct and `Open()`
+method: no `os.ExpandEnv`/env-var substitution is applied to any connector
+field, so a bare `clientSecret: $GITHUB_CLIENT_SECRET` string (the kind of
+snippet some Dex docs pages show) is NOT expanded by Dex itself and would
+leak the literal string if a plaintext secret isn't substituted some other
+way. The only secret-safe path with this chart (`configSecret.create: true`
+renders `.Values.config` verbatim into a Secret) is to render the **entire**
+`config.yaml` outside Helm/Git, via an ExternalSecret's own templating:
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: dex-config
+  namespace: dex
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: gcp-secret-manager, kind: ClusterSecretStore}
+  target:
+    name: dex-config
+    template:
+      data:
+        config.yaml: |
+          issuer: https://<dex-hostname>/dex
+          storage:
+            type: memory   # or a persistent backend -- TO VERIFY whether this matters for the real GitHub connector
+          connectors:
+            - type: github
+              id: github
+              name: GitHub
+              config:
+                clientID: "{{ .clientID }}"
+                clientSecret: "{{ .clientSecret }}"
+                redirectURI: https://<dex-hostname>/dex/callback
+                orgs:
+                  - name: agh-alice
+          staticClients:
+            - id: grafana
+              name: Grafana
+              secretEnv: GRAFANA_OIDC_CLIENT_SECRET
+              redirectURIs:
+                - https://<grafana-hostname>/login/generic_oauth
+  data:
+    - secretKey: clientID
+      remoteRef: {key: dex-github-oauth-client-id}
+    - secretKey: clientSecret
+      remoteRef: {key: dex-github-oauth-client-secret}
+```
+
+Then set `apps/infra/dex.yaml`'s values to `configSecret: {create: false,
+name: dex-config}` and drop the inline `config:`/`connectors:`/
+`staticClients:` block this file currently carries for kind's mock
+connector — the ExternalSecret above becomes the sole source of Dex's
+config on cyfronet. Store `dex-github-oauth-client-id`/
+`dex-github-oauth-client-secret` in GCP Secret Manager under project
+`tensile-ethos-474915-f7` (same project every other cyfronet secret in
+this repo uses), populated from Step 1's OAuth App values. Grafana's own
+`dex-grafana-oauth` Secret (kind: harness-generated by `hack/kind-up.sh`)
+becomes an ExternalSecret too, same §5 pattern, sourcing a
+`grafana-oidc-client-secret` key — the value must equal whatever the
+`staticClients[].secretEnv`-referenced env var resolves to, same
+shared-value constraint as kind's two-namespace Secret pair.
+
+**TO VERIFY**: whether `storage.type: memory` is acceptable for the real
+GitHub connector in production (kind only ever proved memory storage works
+for `mockCallback` + one static client) — a Dex pod restart drops all
+in-flight auth-code state, which mostly just means an in-progress login
+has to restart, not a security issue, but re-evaluate once real user load
+exists.
+
+### 3. Lakekeeper OIDC (cyfronet only — NOT applied on kind)
+
+**On kind, Lakekeeper's auth stays open** (`apps/infra/lakekeeper.yaml`
+sets no `auth.oauth2` block at all) — deliberately: open-auth is
+load-bearing for every ingest/Trino/verify probe this platform's own
+harness runs against Lakekeeper's REST catalog (`hack/kind-verify.sh`'s
+`rest-probe`/`warehouse-probe`, `hack/lakekeeper-warehouse.sh`, every
+ingest CronWorkflow's `LAKEKEEPER_URI` client) — flipping it on kind would
+break the platform this task was explicitly told not to touch. Real schema
+below, verified against `lakekeeper/lakekeeper` chart 0.11.0's own
+`values.yaml` (`auth.oauth2.*` block, lines ~491-518) rather than assumed
+from the brief's URI-based invariant (task-4-report.md's earlier finding
+that the chart's real schema differs from that invariant applies here too):
+
+```yaml
+# apps/infra/lakekeeper.yaml addition, cyfronet only:
+auth:
+  oauth2:
+    providerUri: https://<dex-hostname>/dex
+    audience: lakekeeper
+    ui:
+      clientID: lakekeeper-ui
+      scopes: "openid profile email groups"
+```
+
+Lakekeeper acts as an OIDC **resource server** here (validates Bearer
+tokens Dex issues; no `clientSecret` field exists in this chart's
+`auth.oauth2` block at all — confirmed against the chart's real schema,
+not assumed) except for `ui.clientID`, the UI's own browser-side
+authorization-code client, which is `secretEnv`-style secretless at the
+Lakekeeper end too (PKCE-based, native/public client — TO VERIFY once
+implemented, this chart's own docs don't spell out whether Lakekeeper's UI
+flow uses PKCE explicitly). This block needs a matching `staticClients`
+entry in Dex's config (Step 2's ExternalSecret template) with
+`id: lakekeeper-ui`, an `audience`-matching claim, and no `clientSecret` (a
+public client). **This ends Lakekeeper's open-auth mode on cyfronet** —
+every ingest Workflow's Lakekeeper REST client and every Trino query
+against the `lake` catalog will need a real Bearer token once this lands;
+re-verify the whole ingestion+query acceptance sequence
+(`docs/runbooks/ingestion-pipeline.md`) against an authenticated Lakekeeper
+before calling cyfronet's Plan 4 Task 1 complete.
+
+### 4. Trino OIDC — explicitly deferred
+
+Migration plan (`deliverables/plans/2026-07-13-datalake-v2-migration-plan.md`,
+Task 1 Step 4): **"Trino auth deferred until multi-user need"** — Trino's
+own `landing`/`lake` catalog access stays behind the existing `trino_ro`
+Postgres role + Lakekeeper's vended-credentials flow, not OIDC, until a
+real multi-user access-control need materializes. Record this as a
+deliberate deferral, not an oversight, if a future review asks why Trino
+has no `http.authentication.type=OAUTH2` block here.
+
+## Alerting — Plan 4 Task T2S1: G3 = replace webhook secret
+
+On kind, `monitoring/alertmanager-slack-webhook` (harness-provisioned by
+`hack/kind-up.sh`) carries a placeholder URL pointing at the in-cluster
+`echo-receiver` (`chart/templates/echo-receiver.yaml`, kind-only) so the
+whole route/group/inhibit/`slack-datalake`-receiver pipeline
+(`apps/infra/monitoring.yaml`) is provably wired end-to-end without a real
+Slack workspace. **G3 = replace webhook secret**: once the owner provides a
+real Slack incoming-webhook URL, source it via the same §5-style
+ExternalSecret pattern —
+
+```yaml
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: {name: alertmanager-slack-webhook, namespace: monitoring}
+spec:
+  refreshInterval: 1h
+  secretStoreRef: {name: gcp-secret-manager, kind: ClusterSecretStore}
+  target: {name: alertmanager-slack-webhook}
+  data:
+    - secretKey: webhook-url
+      remoteRef: {key: alertmanager-slack-webhook-url}
+```
+
+— same Secret name and key (`webhook-url`) the `slack_configs[].api_url_file`
+path in `apps/infra/monitoring.yaml` already expects, so no chart/values
+change is needed for the swap, only how the Secret is provisioned. `chart/
+values.yaml`'s `echoReceiver.enabled` stays `false` on cyfronet (base
+default; only `values-kind.yaml` turns it on) — nothing extra to disable.

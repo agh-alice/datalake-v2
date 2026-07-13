@@ -50,6 +50,47 @@ kubectl -n minio get secret minio-creds >/dev/null 2>&1 || \
   kubectl -n minio create secret generic minio-creds \
     --from-literal=rootUser="$(openssl rand -hex 16)" \
     --from-literal=rootPassword="$(openssl rand -hex 16)"
+# Dex <-> Grafana OAuth client secret (Plan 4 Task T1S4, design D-Dex):
+# harness-generated, random per kind cluster, never in Git -- the SAME
+# value is written into two namespaces because the two consumers
+# (apps/infra/dex.yaml's staticClients[0].secretEnv, apps/infra/
+# monitoring.yaml's grafana.envFromSecret) each read a same-namespace
+# Secret and Kubernetes Secrets don't cross namespaces. Same
+# generate-once-reuse-after idempotency pattern as this script's
+# `landing-ro`/trino_ro password further down: whichever copy already
+# exists (kind-up.sh rerun) wins, so both namespaces always agree.
+# `monitoring` and `dex` are pre-created here (not left to their
+# Applications' own CreateNamespace=true) so the Secret can exist before
+# `kubectl apply -f apps/infra/` below -- same reasoning as lakekeeper/minio
+# above.
+kubectl create namespace dex --dry-run=client -o yaml | kubectl apply -f -
+kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+if kubectl -n monitoring get secret dex-grafana-oauth >/dev/null 2>&1; then
+  GRAFANA_OIDC_CLIENT_SECRET=$(kubectl -n monitoring get secret dex-grafana-oauth -o jsonpath='{.data.GRAFANA_OIDC_CLIENT_SECRET}' | base64 -d)
+elif kubectl -n dex get secret dex-grafana-oauth >/dev/null 2>&1; then
+  GRAFANA_OIDC_CLIENT_SECRET=$(kubectl -n dex get secret dex-grafana-oauth -o jsonpath='{.data.GRAFANA_OIDC_CLIENT_SECRET}' | base64 -d)
+else
+  GRAFANA_OIDC_CLIENT_SECRET="$(openssl rand -hex 32)"
+fi
+kubectl -n dex create secret generic dex-grafana-oauth \
+  --from-literal=GRAFANA_OIDC_CLIENT_SECRET="$GRAFANA_OIDC_CLIENT_SECRET" \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n monitoring create secret generic dex-grafana-oauth \
+  --from-literal=GRAFANA_OIDC_CLIENT_SECRET="$GRAFANA_OIDC_CLIENT_SECRET" \
+  --dry-run=client -o yaml | kubectl apply -f -
+# Alertmanager Slack-webhook stand-in (Plan 4 Task T2S1 prework): on kind
+# this is a PLACEHOLDER URL pointing at the in-cluster echo-receiver
+# (chart/templates/echo-receiver.yaml, Service echo-receiver.monitoring.svc,
+# values-gated `echoReceiver.enabled` -- true on kind), consumed via
+# `api_url_file` (apps/infra/monitoring.yaml's alertmanagerSpec.secrets
+# comment) so the route/group/inhibit/receiver pipeline is end-to-end
+# testable without a real Slack workspace. Key name `webhook-url` matches
+# that Application's `api_url_file` path verbatim. Cyfronet replaces this
+# Secret's value with a real Slack webhook via ExternalSecret once the
+# owner provides one (G3) -- docs/runbooks/bootstrap-cyfronet.md.
+kubectl -n monitoring get secret alertmanager-slack-webhook >/dev/null 2>&1 || \
+  kubectl -n monitoring create secret generic alertmanager-slack-webhook \
+    --from-literal=webhook-url="http://echo-receiver.monitoring.svc.cluster.local:8080/webhook"
 kubectl apply -f apps/project.yaml
 [ -d apps/infra ] && ls apps/infra/*.yaml >/dev/null 2>&1 && kubectl apply -f apps/infra/
 kubectl apply -f environments/kind/apps/
