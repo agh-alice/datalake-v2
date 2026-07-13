@@ -117,6 +117,7 @@ Optional, with defaults:
 
 | Var | Default | Consumed by |
 |---|---|---|
+| `TRINO_URI` | none -- required, but checked per-command rather than at pipeline startup (final review R1; NOT in `pipeline.py`'s `_REQUIRED_ENV_VARS`) | `maintenance.py`'s `run_trino()`/`run_freshness_check()` (`run-trino-maintenance`, `check-freshness`) and `views.py`'s `run()` (`apply-views`) -- each raises its own `SystemExit: required env var TRINO_URI is not set` the first time it needs a `TrinoClient`, since those three commands are the only ones that talk to Trino; `run-nightly`/`run-retention`/`run-maintenance` never touch it. |
 | `S3_REGION` | `local-01` | `pipeline.py`, `retention.py` (any non-empty string satisfies the S3 SDK; MinIO ignores it) |
 | `RETENTION_DAYS` | `14` (owner decision 2026-07-12) | `retention.py` |
 | `SITESONAR_URL` | `http://alimonitor.cern.ch/download/kalana/` | `sitesonar.py` |

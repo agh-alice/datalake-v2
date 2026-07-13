@@ -27,6 +27,7 @@
 #       - {secretKey: LAKEKEEPER_URI, remoteRef: {key: ingest-lakekeeper-uri}}
 #       - {secretKey: LAKEKEEPER_WAREHOUSE, remoteRef: {key: ingest-lakekeeper-warehouse}}
 #       - {secretKey: RETENTION_DAYS, remoteRef: {key: ingest-retention-days}}
+#       - {secretKey: TRINO_URI, remoteRef: {key: ingest-trino-uri}}
 #
 # Real-S3 placeholder values an operator puts in GCP Secret Manager (project
 # tensile-ethos-474915-f7) under the remote keys above -- illustrative only,
@@ -44,6 +45,10 @@
 #   LAKEKEEPER_URI         http://lakekeeper.lakekeeper.svc:8181       # same in-cluster Service DNS as kind
 #   LAKEKEEPER_WAREHOUSE   default
 #   RETENTION_DAYS         "14"                                        # keep in sync with ingest.retentionDays below
+#   TRINO_URI              http://trino.trino.svc:8080                 # same in-cluster Service DNS as kind;
+#                          non-secret (final review R1) -- required per-command by
+#                          check-freshness/run-trino-maintenance/apply-views, see
+#                          docs/runbooks/ingestion-pipeline.md section 2
 #
 # retentionDays here documents the intended value the same way
 # chart/values.yaml's own field does (it is NOT read by any chart template
