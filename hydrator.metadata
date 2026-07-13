@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "8da10f9a5498593fcc361faea568c10f0f3b7706",
+  "drySha": "e9729cdff37fcf89aefa88b6a39c28f4becbfbd6",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-12T23:36:42Z",
-  "subject": "chore: pin ingest image digest for apply-views drift-detection fix",
-  "body": "New image includes the drift-detection/--strict gate + regeneration\nprocedure from 24af764 (Plan 3 Task 2 review-fix wave). CI run 29213645823,\ndigest verified via docker buildx imagetools inspect (matches the build\nlog's manifest-list digest) and resolvable via the GHCR registry API.\n"
+  "date": "2026-07-13T00:11:34Z",
+  "subject": "feat: physical iceberg maintenance via trino and data-layer freshness gate",
+  "body": "pyiceberg 0.11.1 only expires snapshot metadata (no orphan-file API on this\npin, per maintenance.py's existing docstring); Trino OPTIMIZE/expire_\nsnapshots/remove_orphan_files is the load-bearing physical GC (final review\nelevated this to Plan 3). Verified live against the pinned Trino 476 (docs\npage + a real probe pod): exact procedure syntax, the 7d retention floor\n(matches our chosen threshold exactly, no config change needed), and --\npreviously unproven -- that Lakekeeper's vended S3 credentials permit LIST\n(remove_orphan_files needs it; proven both against a live alice.job_info\ntable and a dedicated scratch-table probe with independent before/after S3\nobject counts via s3fs).\n\ningest-maintenance CronWorkflow becomes a 2-step DAG (pyiceberg expiry then\nTrino physical maintenance); ingest-nightly gains a third step,\ncheck-freshness, completing design D11's data-layer staleness check (D11\nalerting only covered \"the CronWorkflow stopped firing\" until now -- a\nsuccessful-looking nightly run that never actually committed a fresh\nsnapshot was previously invisible). IcebergSnapshotStale documents the\nexit-code path, same honest no-new-components annotation style as\nRetentionUnverifiedRows (per Task 3 in\ndeliverables/plans/2026-07-12-datalake-v2-query-plan.md).\n\n(per Task 3 in deliverables/plans/2026-07-12-datalake-v2-query-plan.md)\n"
 }

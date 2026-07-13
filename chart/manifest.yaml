@@ -144,6 +144,10 @@ spec:
                 - run-nightly
               name: run-retention
               template: run-retention
+            - dependencies:
+                - run-retention
+              name: check-freshness
+              template: check-freshness
         name: main
       - container:
           args:
@@ -161,6 +165,14 @@ spec:
                 name: ingest-env
           image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:62ddcc44ee0f276344f0467a27fceb3c803a119585976415a20fbca1a483d8af
         name: run-retention
+      - container:
+          args:
+            - check-freshness
+          envFrom:
+            - secretRef:
+                name: ingest-env
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:62ddcc44ee0f276344f0467a27fceb3c803a119585976415a20fbca1a483d8af
+        name: check-freshness
     ttlStrategy:
       secondsAfterCompletion: 86400
 ---
@@ -203,6 +215,15 @@ spec:
     entrypoint: main
     serviceAccountName: pipeline-runner
     templates:
+      - dag:
+          tasks:
+            - name: run-maintenance
+              template: run-maintenance
+            - dependencies:
+                - run-maintenance
+              name: run-trino-maintenance
+              template: run-trino-maintenance
+        name: main
       - container:
           args:
             - run-maintenance
@@ -210,7 +231,15 @@ spec:
             - secretRef:
                 name: ingest-env
           image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:62ddcc44ee0f276344f0467a27fceb3c803a119585976415a20fbca1a483d8af
-        name: main
+        name: run-maintenance
+      - container:
+          args:
+            - run-trino-maintenance
+          envFrom:
+            - secretRef:
+                name: ingest-env
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:62ddcc44ee0f276344f0467a27fceb3c803a119585976415a20fbca1a483d8af
+        name: run-trino-maintenance
     ttlStrategy:
       secondsAfterCompletion: 86400
 ---
@@ -286,6 +315,15 @@ spec:
             description: 'Deliberate no-new-components decision (Plan 2 Task 5): retention.py (design D5, provenance E4/E6) exposes NO metric of its own -- a Pushgateway-fed unverified_count gauge was rejected because it adds a new component to the platform purely to surface one exit code. Instead, retention.run()''s exit_code() (ingest/src/alice_ingest/retention.py) returns non-zero IF AND ONLY IF total.unverified > 0 summed across every landing table, which fails the run-retention container, which fails the owning ingest-nightly Workflow -- the EXACT SAME Failed-phase transition WorkflowFailed above already detects (there is no per-workflow-name metric on this controller to scope a narrower expr against, verified live -- see this group''s header comment). This alert therefore has NO independent Prometheus signal: its expr is identical to WorkflowFailed''s, and it will always co-fire with WorkflowFailed, never alone, for this specific cause among the several WorkflowFailed''s broader condition can match. It exists as a separately named, runbook-linkable entry -- so "retention''s safety net tripped" is discoverable by name -- rather than folding this failure mode silently into WorkflowFailed''s generic text. To CONFIRM unverified>0 was the actual cause (vs. a different workflow, or ingest-nightly''s run-nightly step, failing instead), check the failed run-retention pod''s logs for the `RETENTION kept=<n> deleted=<n> unverified=<n>` summary line (unverified>0) or a per-table `RETENTION table=<t> ... unverified=<n>` line (retention.py''s format_summary()/run()). unverified>0 means old landing rows exist that retention could NOT verify are safely replicated to Iceberg yet -- retention kept them rather than risk E4''s class of data loss (deleting rows an interrupted/lagging ingest never finished writing).'
             incident: E4
             summary: A pipeline workflow failed -- check whether retention's unverified>0 guard was the cause
+          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+        - alert: IcebergSnapshotStale
+          annotations:
+            description: 'Deliberate no-new-components decision (Plan 3 Task 3): the data-layer freshness gate (alice_ingest.maintenance. run_freshness_check(), wired as ingest-nightly''s third DAG step `check-freshness`, chart/templates/ingest-cronworkflows.yaml) exposes NO metric of its own -- it fails its own container on staleness, which fails the owning Workflow, which this PrometheusRule group already detects via WorkflowFailed. This alert has NO independent Prometheus signal: same expr as WorkflowFailed, always co-firing with it, never alone, for this specific cause among WorkflowFailed''s broader condition. A core table (job_info/trace/mon_jdls_parsed) reads STALE when its newest Iceberg snapshot (`max(committed_at)` from `lake.alice."<table>$snapshots"`) is older than 26h, or MISSING if the table has no snapshot at all -- either means the data-layer has nothing recent to show even if every upstream step reported success.'
+            incident: E4
+            summary: A pipeline workflow failed -- check whether the data-layer freshness gate (check-freshness) was the cause
           expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
           for: 5m
           labels:
