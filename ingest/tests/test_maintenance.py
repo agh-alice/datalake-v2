@@ -42,13 +42,19 @@ from alice_ingest.maintenance import (
     DEFAULT_MAINTENANCE_OLDER_THAN_DAYS,
     DEFAULT_TRINO_MAINTENANCE_RETENTION_THRESHOLD,
     FreshnessResult,
+    KubernetesApiError,
+    NIGHTLY_CRON_WORKFLOW_NAME,
+    OverlapGuardResult,
     TableMaintenanceResult,
     TrinoMaintenanceResult,
+    WorkflowsClient,
     check_freshness,
+    check_nightly_overlap_guard,
     expire_table_snapshots,
     format_freshness_summary,
     format_table_summary,
     format_trino_maintenance_summary,
+    is_cron_workflow_running,
     list_alice_tables,
     list_trino_alice_tables,
     run,
@@ -768,3 +774,286 @@ class TestRunFreshnessCheck:
         exit_code = run_freshness_check({"TRINO_URI": "http://trino.trino.svc:8080"})
 
         assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# P3T3 review Important 1: nightly-vs-maintenance cross-workflow overlap
+# guard. Production schedules: nightly `0 2 * * *` (activeDeadlineSeconds
+# 21600 -- can run to 08:00), maintenance `0 4 * * 0` -- a real Sunday
+# overlap window. Iceberg OCC + the 7d expiry floor already prevent
+# CORRUPTION on a genuine concurrent-commit conflict between Trino's
+# OPTIMIZE and an in-flight nightly write; this guard exists purely to avoid
+# the AVAILABILITY cost (a conflict-and-retry, or an outright failed
+# maintenance run) by deferring `run-trino-maintenance` to next Sunday when
+# `ingest-nightly` is still Running. Every failure mode except an actual
+# Running nightly resolves to `proceed=True` (fail-open): the guard is an
+# optimization, not the safety layer -- see `check_nightly_overlap_guard`'s
+# docstring in maintenance.py for the full reasoning.
+# ---------------------------------------------------------------------------
+
+
+class FakeWorkflowsClient:
+    """Mirrors the real `WorkflowsClient.list_workflows()` interface shape
+    (one method, `cron_workflow_name -> list[dict]`) without touching the
+    filesystem or network -- `error`, when given, is raised instead of
+    returning, standing in for `KubernetesApiError` (token unreadable, TLS/
+    connection failure, non-2xx response -- module docstring's "API
+    unreachable" case)."""
+
+    def __init__(self, items: list[dict] | None = None, error: Exception | None = None):
+        self._items = items if items is not None else []
+        self._error = error
+        self.list_workflows_calls: list[str] = []
+
+    def list_workflows(self, cron_workflow_name: str) -> list[dict]:
+        self.list_workflows_calls.append(cron_workflow_name)
+        if self._error is not None:
+            raise self._error
+        return self._items
+
+
+class TestIsCronWorkflowRunning:
+    def test_true_when_any_item_has_running_phase(self):
+        client = FakeWorkflowsClient(
+            items=[{"status": {"phase": "Succeeded"}}, {"status": {"phase": "Running"}}]
+        )
+
+        assert is_cron_workflow_running(client, "ingest-nightly") is True
+        assert client.list_workflows_calls == ["ingest-nightly"]
+
+    def test_false_when_no_items(self):
+        client = FakeWorkflowsClient(items=[])
+
+        assert is_cron_workflow_running(client, "ingest-nightly") is False
+
+    def test_false_when_every_item_is_terminal(self):
+        client = FakeWorkflowsClient(
+            items=[{"status": {"phase": "Succeeded"}}, {"status": {"phase": "Failed"}}]
+        )
+
+        assert is_cron_workflow_running(client, "ingest-nightly") is False
+
+    def test_missing_status_or_phase_is_treated_as_not_running(self):
+        client = FakeWorkflowsClient(items=[{}, {"status": {}}])
+
+        assert is_cron_workflow_running(client, "ingest-nightly") is False
+
+
+class TestCheckNightlyOverlapGuard:
+    def test_running_nightly_defers(self):
+        client = FakeWorkflowsClient(items=[{"status": {"phase": "Running"}}])
+
+        result = check_nightly_overlap_guard(client, {})
+
+        assert result == OverlapGuardResult(
+            proceed=False, message="MAINTENANCE DEFERRED: ingest-nightly in flight"
+        )
+
+    def test_nightly_not_running_proceeds_with_no_message(self):
+        client = FakeWorkflowsClient(items=[])
+
+        result = check_nightly_overlap_guard(client, {})
+
+        assert result == OverlapGuardResult(proceed=True, message=None)
+
+    def test_maintenance_force_proceeds_despite_running_and_skips_the_api_call(self):
+        client = FakeWorkflowsClient(items=[{"status": {"phase": "Running"}}])
+
+        result = check_nightly_overlap_guard(client, {"MAINTENANCE_FORCE": "1"})
+
+        assert result.proceed is True
+        assert client.list_workflows_calls == []
+
+    def test_api_unreachable_proceeds_with_a_warning_fail_open(self):
+        client = FakeWorkflowsClient(error=KubernetesApiError("connection refused"))
+
+        result = check_nightly_overlap_guard(client, {})
+
+        assert result.proceed is True
+        assert result.message is not None
+        assert "connection refused" in result.message
+        assert "proceeding" in result.message.lower()
+
+    def test_uses_the_given_cron_workflow_name(self):
+        client = FakeWorkflowsClient(items=[])
+
+        check_nightly_overlap_guard(client, {}, cron_workflow_name="ingest-nightly")
+
+        assert client.list_workflows_calls == ["ingest-nightly"]
+
+    def test_default_cron_workflow_name_is_ingest_nightly(self):
+        assert NIGHTLY_CRON_WORKFLOW_NAME == "ingest-nightly"
+
+
+class FakeK8sResponse:
+    def __init__(self, json_body: dict, status_code: int = 200):
+        self._json_body = json_body
+        self.status_code = status_code
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self) -> dict:
+        return self._json_body
+
+
+class RecordingGetRequests:
+    """Fake `requests` module recording the single GET call
+    `WorkflowsClient.list_workflows()` makes -- mirrors `FakeRequests` in
+    test_views.py, GET-only since this client only ever lists (Important 1's
+    brief: "get/list workflows")."""
+
+    def __init__(self, response):
+        self._response = response
+        self.get_calls: list[dict] = []
+
+    def get(self, url, headers=None, params=None, verify=None, timeout=None):
+        self.get_calls.append(
+            {"url": url, "headers": headers, "params": params, "verify": verify, "timeout": timeout}
+        )
+        return self._response
+
+
+class TestWorkflowsClient:
+    """The real REST client (in-cluster Kubernetes API, `requests`-based,
+    same minimal-client pattern as views.py's TrinoClient rather than adding
+    the full `kubernetes` PyPI package for one get/list call). Unit-tested
+    against a monkeypatched `requests` module + a real tmp_path token file
+    -- no live cluster needed."""
+
+    def test_lists_workflows_with_the_cron_workflow_label_selector(self, monkeypatch, tmp_path):
+        import alice_ingest.maintenance as maintenance_module
+
+        token_path = tmp_path / "token"
+        token_path.write_text("fake-token")
+        fake = RecordingGetRequests(FakeK8sResponse({"items": [{"status": {"phase": "Running"}}]}))
+        monkeypatch.setattr(maintenance_module, "requests", fake)
+
+        client = WorkflowsClient(token_path=str(token_path), ca_cert_path=str(tmp_path / "ca.crt"))
+        items = client.list_workflows("ingest-nightly")
+
+        assert items == [{"status": {"phase": "Running"}}]
+        call = fake.get_calls[0]
+        assert call["url"] == (
+            "https://kubernetes.default.svc/apis/argoproj.io/v1alpha1/"
+            "namespaces/argo-workflows/workflows"
+        )
+        assert call["headers"] == {"Authorization": "Bearer fake-token"}
+        assert call["params"] == {
+            "labelSelector": "workflows.argoproj.io/cron-workflow=ingest-nightly"
+        }
+        assert call["verify"] == str(tmp_path / "ca.crt")
+
+    def test_no_items_key_in_response_returns_empty_list(self, monkeypatch, tmp_path):
+        import alice_ingest.maintenance as maintenance_module
+
+        token_path = tmp_path / "token"
+        token_path.write_text("fake-token")
+        fake = RecordingGetRequests(FakeK8sResponse({}))
+        monkeypatch.setattr(maintenance_module, "requests", fake)
+
+        client = WorkflowsClient(token_path=str(token_path))
+
+        assert client.list_workflows("ingest-nightly") == []
+
+    def test_missing_token_file_raises_kubernetes_api_error(self):
+        client = WorkflowsClient(token_path="/nonexistent/path/token")
+
+        with pytest.raises(KubernetesApiError):
+            client.list_workflows("ingest-nightly")
+
+    def test_request_exception_raises_kubernetes_api_error(self, monkeypatch, tmp_path):
+        import alice_ingest.maintenance as maintenance_module
+        import requests as real_requests
+
+        token_path = tmp_path / "token"
+        token_path.write_text("fake-token")
+
+        class RaisingRequests:
+            exceptions = real_requests.exceptions
+
+            def get(self, *args, **kwargs):
+                raise real_requests.exceptions.ConnectionError("connection refused")
+
+        monkeypatch.setattr(maintenance_module, "requests", RaisingRequests())
+
+        client = WorkflowsClient(token_path=str(token_path))
+
+        with pytest.raises(KubernetesApiError, match="connection refused"):
+            client.list_workflows("ingest-nightly")
+
+
+class TestRunTrinoOverlapGuardIntegration:
+    """Wires `check_nightly_overlap_guard` into `run_trino()` -- the
+    "Trino-maintenance entrypoint" the review Important names -- BEFORE any
+    Trino call is made, so a deferred run never touches the Trino cluster at
+    all (asserted below via an intentionally-empty `ScriptedTrinoClient`
+    script: any Trino statement issued despite deferral raises
+    AssertionError, ScriptedTrinoClient's own "unscripted statement" guard)."""
+
+    def test_defers_when_nightly_is_running_and_never_touches_trino(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        workflows_client = FakeWorkflowsClient(items=[{"status": {"phase": "Running"}}])
+        monkeypatch.setattr(maintenance_module, "WorkflowsClient", lambda: workflows_client)
+        trino_client = ScriptedTrinoClient({})
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: trino_client)
+
+        exit_code = run_trino({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        assert trino_client.statements == []
+        assert "MAINTENANCE DEFERRED: ingest-nightly in flight" in capsys.readouterr().out
+
+    def test_proceeds_when_nightly_not_running(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        workflows_client = FakeWorkflowsClient(items=[])
+        monkeypatch.setattr(maintenance_module, "WorkflowsClient", lambda: workflows_client)
+        client = ScriptedTrinoClient({"SHOW TABLES FROM lake.alice": [[]]})
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_trino({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        assert "TRINO MAINTENANCE SKIPPED" in capsys.readouterr().out
+        assert "MAINTENANCE DEFERRED" not in capsys.readouterr().out
+
+    def test_maintenance_force_proceeds_despite_running_nightly(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        workflows_client = FakeWorkflowsClient(items=[{"status": {"phase": "Running"}}])
+        monkeypatch.setattr(maintenance_module, "WorkflowsClient", lambda: workflows_client)
+        client = ScriptedTrinoClient({"SHOW TABLES FROM lake.alice": [[]]})
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_trino(
+            {"TRINO_URI": "http://trino.trino.svc:8080", "MAINTENANCE_FORCE": "1"}
+        )
+
+        assert exit_code == 0
+        assert workflows_client.list_workflows_calls == []
+        assert "TRINO MAINTENANCE SKIPPED" in capsys.readouterr().out
+
+    def test_api_unreachable_proceeds_with_warning_and_still_runs_maintenance(
+        self, monkeypatch, capsys
+    ):
+        import alice_ingest.maintenance as maintenance_module
+
+        workflows_client = FakeWorkflowsClient(error=KubernetesApiError("boom"))
+        monkeypatch.setattr(maintenance_module, "WorkflowsClient", lambda: workflows_client)
+        client = ScriptedTrinoClient({"SHOW TABLES FROM lake.alice": [[]]})
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_trino({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "MAINTENANCE WARNING" in out
+        assert "boom" in out
+        assert "TRINO MAINTENANCE SKIPPED" in out
+
+    def test_still_requires_trino_uri_even_though_the_guard_runs_first(self):
+        with pytest.raises(SystemExit, match="TRINO_URI"):
+            run_trino({})

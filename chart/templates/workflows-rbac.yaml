@@ -2,6 +2,19 @@
 # Workflows v4 default) needs only create/patch on workflowtaskresults to
 # report step outcomes back to the controller -- it does not touch the
 # Workflow object directly.
+#
+# P3T3 review Important 1 (ingest/src/alice_ingest/maintenance.py's module
+# docstring, "P3T3 review Important 1" section): the nightly-vs-maintenance
+# overlap guard's `WorkflowsClient` needs get/list on `workflows` (the
+# argoproj.io Workflow objects a CronWorkflow spawns, distinct from
+# `workflowtaskresults` above) to check whether `ingest-nightly` is
+# currently Running before `run-trino-maintenance` issues any Trino
+# statement. Smallest possible widening: read-only (get/list, no
+# write/delete verb), namespace-scoped to `argo-workflows` (same Role every
+# CronWorkflow's pipeline-runner SA already uses -- this guard only runs
+# from the maintenance CronWorkflow's pod, but the SA is shared across all
+# three CronWorkflows, so the widening is visible to all of them even
+# though only one uses it).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -17,6 +30,9 @@ rules:
   - apiGroups: [argoproj.io]
     resources: [workflowtaskresults]
     verbs: [create, patch]
+  - apiGroups: [argoproj.io]
+    resources: [workflows]
+    verbs: [get, list]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

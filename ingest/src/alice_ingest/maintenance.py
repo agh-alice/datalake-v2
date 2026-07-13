@@ -146,6 +146,71 @@ Which tables get Trino maintenance: `SHOW TABLES FROM lake.alice`, dynamic
 maintenance above, so `site_sonar` and any future `alice.*` table are
 covered without a code change.
 
+P3T3 review Important 1: nightly-vs-maintenance overlap guard
+--------------------------------------------------------------------------
+Production schedules: `ingest-nightly` fires `0 2 * * *` with
+`activeDeadlineSeconds: 21600` (chart/values.yaml), so a slow run can still
+be executing at 08:00; `ingest-maintenance` (this module's Trino half)
+fires `0 4 * * 0` -- Sunday 04:00 sits squarely inside that window, so a
+real overlap is possible, not a theoretical edge case. Iceberg's optimistic
+concurrency control (every commit is a compare-and-swap against the
+table's current metadata pointer) already prevents CORRUPTION if Trino's
+`OPTIMIZE`/`expire_snapshots`/`remove_orphan_files` and an in-flight
+nightly write race for the same table -- one of the two commits simply
+fails and (for Trino's procedures) surfaces as a query error. What OCC does
+NOT prevent is the AVAILABILITY cost of that failure: a failed maintenance
+run (or a failed nightly write, if nightly loses the race) that then has to
+wait a full week (or a full day) for the next scheduled attempt. This guard
+exists purely to avoid paying that cost when it's cheap to avoid --
+`run_trino()` (wired from the `run-trino-maintenance` CLI command, the
+weekly CronWorkflow's Trino-maintenance entrypoint) checks whether
+`ingest-nightly`'s most recent Workflow is currently `Running` via the
+Kubernetes API (`WorkflowsClient`, RBAC added in
+chart/templates/workflows-rbac.yaml) BEFORE issuing any Trino statement,
+and defers (`MAINTENANCE DEFERRED: ingest-nightly in flight`, exit 0 -- not
+a failure, next Sunday's tick catches up) if one is found.
+
+This is a best-effort OPTIMIZATION layered on top of a safety mechanism
+that already works without it, which is why every failure mode below a
+genuinely Running nightly resolves to `proceed=True` (`check_nightly_
+overlap_guard()`'s `OverlapGuardResult`):
+  - `MAINTENANCE_FORCE=1` (env) skips the Kubernetes API call entirely and
+    proceeds -- an operator's explicit override, documented in
+    docs/runbooks/ingestion-pipeline.md's env-var table, for a manual
+    maintenance trigger the operator already knows is safe (e.g. they just
+    confirmed nightly is NOT running, or they accept the OCC-mediated risk
+    for a one-off run).
+  - An unreachable Kubernetes API (RBAC misconfigured, token unreadable,
+    apiserver connection failure -- anything `WorkflowsClient.
+    list_workflows()` raises as `KubernetesApiError`) proceeds too, with a
+    `MAINTENANCE WARNING` line rather than blocking. Reasoning: this guard
+    is an optimization, not the safety layer (Iceberg OCC is), so a routine
+    weekly job should not fail outright because a best-effort check
+    couldn't run -- that would make the guard itself a new single point of
+    failure for a job that worked fine before this guard existed.
+Only a confirmed Running `ingest-nightly` Workflow defers. TDD coverage
+(`ingest/tests/test_maintenance.py`, "P3T3 review Important 1" section)
+exercises all four paths (running -> defer; none -> proceed; force ->
+proceed despite running; API unreachable -> proceed with a warning) against
+a fake k8s-API client -- no live overlap was fabricated on the shared kind
+cluster to test this (there is exactly one shared cluster; deliberately
+colliding a real Sunday maintenance tick with a real nightly run would risk
+an actual production-shaped commit conflict for no verification benefit the
+fakes don't already provide).
+
+`WorkflowsClient` is a minimal in-cluster REST client (same pattern as
+views.py's `TrinoClient`: a `requests`-based client scoped to exactly the
+one call this module needs) rather than a dependency on the full
+`kubernetes` PyPI package for a single GET. It reads the pod's mounted
+ServiceAccount token (`pipeline-runner`, workflows-rbac.yaml) and CA cert
+from the standard in-cluster paths at call time, and lists `Workflow`
+custom objects (`argoproj.io/v1alpha1`) filtered by the
+`workflows.argoproj.io/cron-workflow=<name>` label -- the same label
+`docs/runbooks/ingestion-pipeline.md`'s existing manual `kubectl get
+workflow -l workflows.argoproj.io/cron-workflow=ingest-nightly` recipe
+already uses, so this guard queries exactly what a human operator would
+check by hand.
+
 Data-layer freshness gate (design D11 completion)
 --------------------------------------------------------------------------
 The nightly workflow's final `check-freshness` step: `max(committed_at)`
@@ -175,6 +240,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Mapping
 
+import requests
+
 from alice_ingest.pipeline import DATASET_NAME
 from alice_ingest.retention import load_iceberg_catalog
 from alice_ingest.views import CATALOG, SOURCE_SCHEMA, TrinoClient, TrinoQueryError
@@ -185,6 +252,14 @@ DEFAULT_MAINTENANCE_OLDER_THAN_DAYS = "7"
 DEFAULT_TRINO_MAINTENANCE_RETENTION_THRESHOLD = "7d"
 CORE_FRESHNESS_TABLES = ("job_info", "trace", "mon_jdls_parsed")
 DEFAULT_FRESHNESS_MAX_AGE_HOURS = "26"
+
+# P3T3 review Important 1: nightly-vs-maintenance overlap guard (module
+# docstring, "P3T3 review Important 1" section).
+NIGHTLY_CRON_WORKFLOW_NAME = "ingest-nightly"
+ARGO_WORKFLOWS_NAMESPACE = "argo-workflows"
+DEFAULT_K8S_API_SERVER = "https://kubernetes.default.svc"
+DEFAULT_K8S_TOKEN_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+DEFAULT_K8S_CA_CERT_PATH = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
 
 
 def _now() -> datetime:
@@ -358,15 +433,145 @@ def run_trino_maintenance(
     return results
 
 
+class KubernetesApiError(RuntimeError):
+    """Raised by `WorkflowsClient.list_workflows()` for every failure mode
+    (unreadable ServiceAccount token, TLS/connection failure, non-2xx
+    response) -- one exception type so `check_nightly_overlap_guard()` has
+    exactly one thing to catch for its fail-open path (module docstring,
+    "P3T3 review Important 1")."""
+
+
+@dataclass(frozen=True)
+class WorkflowsClient:
+    """Minimal in-cluster REST client for listing Argo `Workflow` custom
+    objects (`argoproj.io/v1alpha1`) -- mirrors views.py's `TrinoClient`
+    (a `requests`-based client scoped to exactly the one call this module
+    needs) rather than adding the full `kubernetes` PyPI package as a
+    dependency for a single GET. Reads the token/CA at CALL time, not
+    construction time, so a client can be constructed in a unit test (or
+    before the ServiceAccount volume is mounted) without either file
+    existing yet."""
+
+    api_server: str = DEFAULT_K8S_API_SERVER
+    namespace: str = ARGO_WORKFLOWS_NAMESPACE
+    token_path: str = DEFAULT_K8S_TOKEN_PATH
+    ca_cert_path: str = DEFAULT_K8S_CA_CERT_PATH
+    timeout: float = 10.0
+
+    def list_workflows(self, cron_workflow_name: str) -> list[dict]:
+        """GET .../workflows?labelSelector=workflows.argoproj.io/
+        cron-workflow=<cron_workflow_name> -- the same label docs/runbooks/
+        ingestion-pipeline.md's existing manual `kubectl get workflow -l
+        ...` recipe already uses. Returns the raw `items` list (each a
+        Workflow object dict); `is_cron_workflow_running()` below reads
+        `.status.phase` from each."""
+        try:
+            with open(self.token_path, encoding="utf-8") as fh:
+                token = fh.read().strip()
+        except OSError as exc:
+            raise KubernetesApiError(f"cannot read service account token: {exc}") from exc
+
+        url = f"{self.api_server}/apis/argoproj.io/v1alpha1/namespaces/{self.namespace}/workflows"
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {token}"},
+                params={"labelSelector": f"workflows.argoproj.io/cron-workflow={cron_workflow_name}"},
+                verify=self.ca_cert_path,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            raise KubernetesApiError(f"Kubernetes API request failed: {exc}") from exc
+        return resp.json().get("items", [])
+
+
+def is_cron_workflow_running(client, cron_workflow_name: str = NIGHTLY_CRON_WORKFLOW_NAME) -> bool:
+    """True if any Workflow object `client.list_workflows(cron_workflow_
+    name)` returns has `status.phase == "Running"` -- Argo's own phase
+    value for an in-progress Workflow (Succeeded/Failed/Error are the
+    terminal phases, none of which indicate an overlap risk). A missing
+    `status` or `phase` key (a Workflow object that hasn't been scheduled
+    onto a pod yet) is treated as not-running rather than raised -- this
+    function only answers "is one currently executing", and an object
+    without a phase yet is not."""
+    items = client.list_workflows(cron_workflow_name)
+    return any(item.get("status", {}).get("phase") == "Running" for item in items)
+
+
+@dataclass(frozen=True)
+class OverlapGuardResult:
+    """`proceed=False` only for a confirmed Running nightly; `message` is
+    `None` on the silent-proceed path (nothing worth logging) and set on
+    every other path (deferred, forced, or fail-open-with-warning) -- see
+    `check_nightly_overlap_guard()`'s docstring for which is which."""
+
+    proceed: bool
+    message: str | None = None
+
+
+def check_nightly_overlap_guard(
+    client,
+    env: Mapping[str, str],
+    cron_workflow_name: str = NIGHTLY_CRON_WORKFLOW_NAME,
+) -> OverlapGuardResult:
+    """The P3T3 review Important 1 guard (module docstring has the full
+    reasoning). Order of checks:
+
+    1. `MAINTENANCE_FORCE=1` (env) -- skip the API call entirely, proceed.
+       An operator's explicit override (docs/runbooks/ingestion-pipeline.md).
+    2. Query `client.list_workflows(cron_workflow_name)` via
+       `is_cron_workflow_running()`:
+       - `KubernetesApiError` (API unreachable, RBAC misconfigured, token
+         unreadable) -- proceed anyway, with a `MAINTENANCE WARNING`
+         message. Fail-open: this guard is an optimization (avoid an
+         OPTIMIZE-vs-in-flight-write commit conflict's availability cost),
+         NOT the safety layer -- Iceberg's optimistic concurrency control
+         already prevents corruption on a real conflict, so a best-effort
+         check that can't run should not block a routine weekly job.
+       - Running -- defer (`proceed=False`, `MAINTENANCE DEFERRED: <name>
+         in flight`). Next Sunday's tick catches up; this is not a failure.
+       - Not running -- proceed silently (`message=None`).
+    """
+    if env.get("MAINTENANCE_FORCE") == "1":
+        return OverlapGuardResult(proceed=True)
+    try:
+        running = is_cron_workflow_running(client, cron_workflow_name)
+    except KubernetesApiError as exc:
+        return OverlapGuardResult(
+            proceed=True,
+            message=(
+                f"MAINTENANCE WARNING: nightly-overlap guard check failed ({exc}); "
+                f"proceeding (fail-open -- Iceberg OCC is the safety layer, "
+                f"this guard is an optimization)"
+            ),
+        )
+    if running:
+        return OverlapGuardResult(
+            proceed=False, message=f"MAINTENANCE DEFERRED: {cron_workflow_name} in flight"
+        )
+    return OverlapGuardResult(proceed=True)
+
+
 def run_trino(env: Mapping[str, str] | None = None) -> int:
     """Entry point wired from pipeline.py's `run-trino-maintenance` CLI
     command -- the weekly ingest-maintenance CronWorkflow's second DAG step,
     after the existing pyiceberg `run-maintenance` step (brief, Step 3:
-    "maintenance: after the pyiceberg step")."""
+    "maintenance: after the pyiceberg step"). Runs the P3T3 review
+    Important 1 nightly-overlap guard (`check_nightly_overlap_guard()`)
+    before issuing any Trino statement -- a deferred run returns 0 without
+    ever constructing a `TrinoClient`."""
     env = env if env is not None else os.environ
     trino_uri = env.get("TRINO_URI")
     if not trino_uri:
         raise SystemExit("alice-ingest: required env var TRINO_URI is not set")
+
+    guard_result = check_nightly_overlap_guard(WorkflowsClient(), env)
+    if guard_result.message:
+        print(guard_result.message)
+    if not guard_result.proceed:
+        return 0
+
     retention_threshold = env.get(
         "TRINO_MAINTENANCE_RETENTION_THRESHOLD", DEFAULT_TRINO_MAINTENANCE_RETENTION_THRESHOLD
     )

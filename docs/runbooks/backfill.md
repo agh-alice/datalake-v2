@@ -155,3 +155,71 @@ one). No manual watermark cleanup step is needed after a normal
 (non-reset) backfill run; only the reset path (section 3, first bullet)
 requires a deliberate `INGEST_INITIAL_*` value, since reset removes all
 prior state.
+
+## Snapshot retention vs migration (Plan 4)
+
+The weekly `ingest-maintenance` CronWorkflow (`0 4 * * 0`,
+`ingest/src/alice_ingest/maintenance.py`) expires Iceberg snapshots older
+than **7 days** on both its pyiceberg pass (`MAINTENANCE_OLDER_THAN_DAYS`,
+default `7`) and its Trino physical pass (`TRINO_MAINTENANCE_RETENTION_
+THRESHOLD`, default `7d` -- `expire_snapshots`/`remove_orphan_files`). Once
+a snapshot expires, Iceberg time-travel (`FOR VERSION AS OF` / `FOR
+TIMESTAMP AS OF` queries, or a direct `catalog.load_table(...).scan(
+snapshot_id=...)`) can no longer read it -- expiry is metadata deletion
+(pyiceberg pass) followed by physical file GC (Trino's `remove_orphan_
+files`), not a soft delete.
+
+**This matters for Plan 4's dual-run comparison.** If the migration's
+gen-1-vs-gen-2 comparison needs to time-travel across a window longer than
+7 days (e.g. comparing gen-2's state as of the cutover date against an
+earlier gen-2 snapshot from before the cutover, once more than a week has
+elapsed), the routine weekly expiry will have already removed the
+snapshots that comparison needs. Two supported options, pick one **before**
+starting the dual-run window:
+
+- **Pause the maintenance CronWorkflow for the migration period.** Suspend
+  `ingest-maintenance` (`kubectl -n argo-workflows patch cronworkflow
+  ingest-maintenance --type merge -p '{"spec":{"suspend":true}}'`, unsuspend
+  the same way when the comparison window closes) -- simplest, no config
+  drift to remember to revert, but also means NO maintenance runs at all
+  during the pause (snapshot accumulation, not just the ones Plan 4 cares
+  about, continues unbounded for the pause's duration -- fine for a bounded
+  migration window, not for an indefinite pause).
+- **Raise `TRINO_MAINTENANCE_RETENTION_THRESHOLD` beforehand** (env var,
+  already supported by `maintenance.py`'s `run_trino()` -- see
+  `docs/runbooks/ingestion-pipeline.md`'s env-var table) to a value that
+  comfortably covers the comparison window, e.g. `30d`, set on the
+  `ingest-env` Secret/ExternalSecret before the window opens and reverted
+  to `7d` (or unset, since `7d` is the default) after. This keeps
+  maintenance running on its normal schedule while simply expiring less
+  aggressively -- preferable to a full pause if the migration window is
+  long or its exact end date is uncertain. Note this env var only
+  overrides the PYICEBERG-side `MAINTENANCE_OLDER_THAN_DAYS` cutoff and the
+  Trino-side `TRINO_MAINTENANCE_RETENTION_THRESHOLD` argument passed to
+  `expire_snapshots`/`remove_orphan_files` -- it does not touch
+  `MAINTENANCE_OLDER_THAN_DAYS` itself, which has its own separate env var
+  and defaults to the same `7` if not also raised. Raise both together if
+  the pyiceberg-side expiry pass also needs to preserve the longer window.
+
+**Going the other direction never applies here, but is worth knowing
+about.** `TRINO_MAINTENANCE_RETENTION_THRESHOLD` can only be raised freely
+-- Trino's Iceberg connector enforces a SERVER-SIDE minimum retention floor
+via two connector config properties, `iceberg.expire-snapshots.min-
+retention` and `iceberg.remove-orphan-files.min-retention`, both defaulting
+to `7d` on this cluster's pinned Trino 476 (verified live: `retention_
+threshold => '0s'` fails with `INVALID_PROCEDURE_ARGUMENT`, `'7d'` -- 
+exactly at the floor -- succeeds; see `maintenance.py`'s module docstring,
+"Retention floor" section, for the full verification trail). Production's
+default `7d` threshold already sits exactly at that floor, so this doesn't
+affect either option above. It would only matter if some future need went
+BELOW 7 days: that requires a matching catalog-config bump (raising the
+connector properties, a Trino chart/values change, not an env var this
+codebase exposes) alongside a per-session override for a one-off run
+(`SET SESSION lake.expire_snapshots_min_retention = '<duration>'` and `SET
+SESSION lake.remove_orphan_files_min_retention = '<duration>'` --
+catalog-scoped session properties, property name prefixed with the
+CATALOG name `lake`, not the connector name `iceberg`; proven live during
+Plan 3 Task 3's physical-GC verification, not wired into any code path).
+Not needed for Plan 4's dual-run comparison (which only ever needs to
+RAISE retention, never lower it), documented here only because raising and
+lowering the floor look symmetric at first glance and are not.
