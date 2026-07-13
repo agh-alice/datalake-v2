@@ -1,5 +1,11 @@
 # environment: kind — overrides land here as components arrive
 
+# hello CronWorkflow is the workflow-execution canary kind-verify's manual
+# probe depends on (chart/values.yaml's comment) -- enabled here, base
+# default stays FALSE so cyfronet never runs it.
+helloCron:
+  enabled: true
+
 landingDb:
   instances: 1
   storageSize: 2Gi

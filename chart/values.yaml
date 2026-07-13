@@ -6,6 +6,17 @@ namespaces:
   - lakekeeper
   - landing-db
 
+# hello CronWorkflow values-gate (Plan-1 final-review N6, Plan 3 Task 5):
+# it exists purely as a workflow-execution canary for kind-verify's manual
+# probe (hack/kind-verify.sh queries `cronworkflow hello` for its pinned
+# busybox image, then submits a throwaway Workflow using that image) --
+# there is no reason for cyfronet production to run a no-op "echo hello"
+# CronWorkflow on a schedule forever. Base default FALSE (cyfronet inherits
+# this, no override needed there); chart/values-kind.yaml overrides to TRUE
+# so the canary exists on kind, where kind-verify's probe needs it.
+helloCron:
+  enabled: false
+
 # Digest-pinned per no-mutable-tags convention. Verified via:
 #   docker pull busybox:1.36 && docker inspect busybox:1.36 \
 #     --format '{{index .RepoDigests 0}}'

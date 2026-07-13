@@ -1,3 +1,4 @@
+{{- if .Values.helloCron.enabled }}
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
@@ -25,3 +26,4 @@ spec:
         container:
           image: {{ .Values.images.busybox }}
           command: [sh, -c, "echo hello from datalake-v2 && date"]
+{{- end }}
