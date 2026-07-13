@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "d90b8af992b055766c511908601d3f95c938136e",
+  "drySha": "7746f629363c23eb4e40288e8aaa08ea624df26e",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T00:14:31Z",
-  "subject": "chore: pin ingest image digest for trino maintenance + freshness gate",
-  "body": "(per Task 3 in deliverables/plans/2026-07-12-datalake-v2-query-plan.md)\n"
+  "date": "2026-07-13T00:51:30Z",
+  "subject": "fix: maintenance defers to in-flight nightly + plan-4 retention runbook note (review importants)",
+  "body": "P3T3 review Important 1: ingest-nightly (0 2 * * *, can run to 08:00) and\ningest-maintenance (0 4 * * 0) have a real Sunday overlap window. Iceberg\nOCC prevents corruption on a concurrent OPTIMIZE-vs-write commit conflict\nbut not the availability cost of one, so run_trino() now checks for a\nRunning ingest-nightly Workflow via the Kubernetes API before issuing any\nTrino statement, deferring (exit 0) if found. Fail-open by design (guard\nis an optimization, not the safety layer): MAINTENANCE_FORCE=1 skips the\ncheck, and an unreachable API proceeds with a warning. RBAC widened\nread-only (get/list workflows) on the existing pipeline-runner Role.\n\nP3T3 review Important 2: documents the two supported options (pause\ningest-maintenance, or raise TRINO_MAINTENANCE_RETENTION_THRESHOLD) for\nPlan 4's dual-run comparison to keep the time-travel window it needs from\nbeing pruned by the routine 7-day snapshot expiry.\n"
 }
