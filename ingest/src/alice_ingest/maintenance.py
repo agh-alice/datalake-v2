@@ -240,6 +240,57 @@ way, which fails the `check-freshness` container, which fails the owning
 ingest-nightly Workflow, surfacing through the existing WorkflowFailed alert
 (same no-new-components pattern as retention.py's unverified>0 guard,
 RetentionUnverifiedRows' annotation in datalake-alerts.yaml).
+
+Final review R2: OPTIMIZE masks the freshness gate -- fixed, live-verified
+--------------------------------------------------------------------------
+The freshness query above originally had no `WHERE` clause at all:
+`SELECT max(committed_at) FROM ..."<table>$snapshots"`. Trino's weekly
+`ALTER TABLE ... EXECUTE optimize` (`run_trino()`'s physical-GC half, above)
+commits its OWN new Iceberg snapshot when it actually rewrites files --
+compaction, not new data -- so that unfiltered query let a Sunday
+`run-trino-maintenance` tick silently refresh `check-freshness`'s signal on
+a table `run-nightly` had not actually appended to in days, defeating the
+gate exactly when it matters (a real ingestion stall, masked by a
+maintenance run that happens to land inside the staleness window).
+
+The `$snapshots` metadata table exposes an `operation` column
+(`https://trino.io/docs/476/connector/iceberg.html`'s metadata-tables
+section) that names each commit's Iceberg operation. What OPTIMIZE and
+dlt/pyiceberg appends actually WRITE to that column was verified live
+against this pin's real Trino 476 (2026-07-13), not assumed:
+  - The three real production core tables (`job_info`, `trace`,
+    `mon_jdls_parsed`), each after its own dlt/pyiceberg `run-nightly`
+    commit: `operation='append'` on all three, e.g. `SELECT committed_at,
+    operation FROM lake.alice."job_info$snapshots"` ->
+    `['2026-07-13 02:39:01.985 UTC', 'append']`.
+  - A scratch table (schema `lake.op_probe`, dropped after the probe -- same
+    "test on a scratch table first" pattern as the physical-GC proof
+    above): 6 separate `INSERT INTO ... VALUES (...)` statements (Trino's
+    closest equivalent to dlt/pyiceberg's own per-batch append commits)
+    each produced a snapshot with `operation='append'`, THEN `ALTER TABLE
+    ... EXECUTE optimize` produced a 7th snapshot with `operation='replace'`
+    and `total-records` UNCHANGED (5 -> 5 in the run that produced this
+    evidence) -- `added-records`/`deleted-records` both 5, confirming pure
+    compaction, no data change, exactly the masking scenario this fix
+    closes.
+  - `operation` was NEVER NULL on any of the 9 commits observed above (6
+    scratch appends + 1 replace + 2 of the 3 production appends already
+    covered the append case redundantly; the third, `trace`, also
+    'append'). No engine on this pin produces a NULL-operation commit in
+    practice.
+Conclusion: `table_freshness()` filters `WHERE operation <> 'replace'`
+server-side (not the defensive `(operation IS NULL OR operation <>
+'replace')` form) -- the live evidence above shows the simpler filter is
+correct for both commit sources this pipeline actually sees, and a NULL
+escape hatch would only guard against a case that has never been observed
+to occur, at the cost of masking a genuine future bug (a query that
+silently returns nothing because every row it should have matched
+mysteriously had a NULL operation) behind a plausible-looking WHERE clause.
+If a future engine or Iceberg-spec change ever produces a NULL `operation`,
+`table_freshness()` would report that table as `missing`-shaped (NULL
+`max_committed_at`, `is_stale()` True) rather than silently wrong -- fails
+loud, not quiet, matching this module's existing missing-table philosophy
+above.
 """
 
 from __future__ import annotations
@@ -642,15 +693,21 @@ class FreshnessResult:
 
 
 def table_freshness(client, table: str) -> FreshnessResult:
-    """`SELECT max(committed_at) FROM lake.alice."<table>$snapshots"` for
-    ONE table. A `TrinoQueryError` that looks like "the table doesn't exist"
-    becomes `missing=True` rather than propagating (module docstring); any
-    OTHER Trino error (permissions, connectivity) is re-raised -- freshness
-    checking must not silently swallow an unrelated failure as if it were
-    "no data yet"."""
+    """`SELECT max(committed_at) FROM lake.alice."<table>$snapshots" WHERE
+    operation <> 'replace'` for ONE table. The `operation <> 'replace'`
+    filter (final review R2, module docstring "Final review R2" section) is
+    load-bearing: without it, a Trino `OPTIMIZE`-produced compaction
+    snapshot (no new data, `operation='replace'`) can be more recent than
+    the table's last real dlt/pyiceberg append and would silently mask a
+    genuine ingestion stall. A `TrinoQueryError` that looks like "the table
+    doesn't exist" becomes `missing=True` rather than propagating (module
+    docstring); any OTHER Trino error (permissions, connectivity) is
+    re-raised -- freshness checking must not silently swallow an unrelated
+    failure as if it were "no data yet"."""
     try:
         rows = client.run(
-            f'SELECT max(committed_at) FROM {CATALOG}.{SOURCE_SCHEMA}."{table}$snapshots"'
+            f'SELECT max(committed_at) FROM {CATALOG}.{SOURCE_SCHEMA}."{table}$snapshots" '
+            "WHERE operation <> 'replace'"
         )
     except TrinoQueryError as exc:
         if _looks_like_missing_table_error(exc):

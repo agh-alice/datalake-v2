@@ -535,7 +535,7 @@ class TestTableFreshness:
     def test_fresh_table_reports_its_max_committed_at(self):
         client = ScriptedTrinoClient(
             {
-                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" WHERE operation <> \'replace\'': [
                     [["2026-07-13 02:00:00.000 UTC"]]
                 ],
             }
@@ -552,7 +552,7 @@ class TestTableFreshness:
     def test_missing_table_is_reported_as_missing_not_raised(self):
         client = ScriptedTrinoClient(
             {
-                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" WHERE operation <> \'replace\'': [
                     TrinoQueryError(
                         "{'message': \"line 1:32: Table 'lake.alice.job_info' does not exist\", "
                         "'errorName': 'TABLE_NOT_FOUND'}"
@@ -568,7 +568,7 @@ class TestTableFreshness:
     def test_table_with_zero_snapshots_reports_null_not_missing(self):
         client = ScriptedTrinoClient(
             {
-                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [[[None]]],
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" WHERE operation <> \'replace\'': [[[None]]],
             }
         )
 
@@ -579,7 +579,7 @@ class TestTableFreshness:
     def test_a_different_trino_query_error_is_not_swallowed(self):
         client = ScriptedTrinoClient(
             {
-                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" WHERE operation <> \'replace\'': [
                     TrinoQueryError("{'message': 'PERMISSION_DENIED', 'errorName': 'PERMISSION_DENIED'}")
                 ],
             }
@@ -587,6 +587,106 @@ class TestTableFreshness:
 
         with pytest.raises(TrinoQueryError, match="PERMISSION_DENIED"):
             table_freshness(client, "job_info")
+
+
+class TestTableFreshnessExcludesReplaceSnapshots:
+    """Final review R2: Trino's weekly `OPTIMIZE` (`run-trino-maintenance`)
+    commits a NEW Iceberg snapshot -- physically compacting files, adding NO
+    new data -- recorded with `operation='replace'` (live-verified against
+    this pin's real Trino 476, 2026-07-13: a scratch table with 6
+    dlt/pyiceberg-style `INSERT`-then-`OPTIMIZE` commits showed
+    `operation='append'` for every one of the 6 inserts and
+    `operation='replace'` for the following `OPTIMIZE`, with `total-records`
+    unchanged across the replace (5 -> 5) -- pure compaction, not new data;
+    the SAME `operation='append'` was independently confirmed on the three
+    real production core tables' own single ingest snapshot each
+    (job_info/trace/mon_jdls_parsed), and `operation` was never NULL on any
+    commit observed, dlt/pyiceberg or Trino). The OLD query (`SELECT
+    max(committed_at) FROM ..."<table>$snapshots"`, no operation filter)
+    therefore lets a Sunday `run-trino-maintenance` OPTIMIZE run silently
+    refresh `check-freshness`'s signal even when `run-nightly` has not
+    appended anything new in days -- the freshness gate goes blind exactly
+    when it matters most. Fix: `table_freshness()` now filters `WHERE
+    operation <> 'replace'` server-side, so `max(committed_at)` only ever
+    reflects a real data-bearing commit. No `(operation IS NULL OR ...)`
+    escape hatch is needed -- the live evidence above shows `operation` is
+    populated on every commit this pin produces, dlt/pyiceberg or Trino
+    alike; a bare `<> 'replace'` is correct and does not risk silently
+    dropping a legitimate NULL-operation row that doesn't occur in
+    practice."""
+
+    def test_append_only_history_reports_fresh(self):
+        """Baseline: a table with only append snapshots (no maintenance run
+        yet) is unaffected by the fix -- same shape as the pre-fix
+        behavior, just via the filtered query."""
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" '
+                "WHERE operation <> 'replace'": [[["2026-07-13 02:00:00.000 UTC"]]],
+            }
+        )
+
+        result = table_freshness(client, "job_info")
+
+        assert result == FreshnessResult(
+            table="job_info",
+            max_committed_at=datetime(2026, 7, 13, 2, 0, 0, tzinfo=timezone.utc),
+            missing=False,
+        )
+        assert result.is_stale(NOW, timedelta(hours=26)) is False
+
+    def test_stale_appends_masked_by_a_fresh_replace_reports_stale(self):
+        """The masking case this fix closes: the table's most RECENT
+        Iceberg snapshot overall is a same-day Trino OPTIMIZE (`replace`),
+        but its most recent APPEND -- the only kind of commit that means
+        `run-nightly` actually landed new data -- is 3 days old, well
+        outside the 26h default. The pre-fix unfiltered query would have
+        picked up the replace's fresh `committed_at` and wrongly reported
+        FRESH; the filtered query issued here excludes that replace
+        server-side and returns the stale append's timestamp instead, which
+        `table_freshness` must report as-is (staleness itself is
+        `FreshnessResult.is_stale`'s job, exercised below)."""
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" '
+                "WHERE operation <> 'replace'": [[["2026-07-10 02:00:00.000 UTC"]]],
+            }
+        )
+
+        result = table_freshness(client, "job_info")
+
+        assert result == FreshnessResult(
+            table="job_info",
+            max_committed_at=datetime(2026, 7, 10, 2, 0, 0, tzinfo=timezone.utc),
+            missing=False,
+        )
+        assert result.is_stale(NOW, timedelta(hours=26)) is True
+
+    def test_mixed_history_still_reports_the_most_recent_append(self):
+        """A table with an interleaved append/replace history (several
+        nightly appends, a weekly OPTIMIZE in between, then another recent
+        append) reports the most recent APPEND's timestamp -- proving the
+        filter does not just handle the all-replace-at-the-tail case but
+        genuinely ignores every replace snapshot regardless of position in
+        history. Trino's own `max(committed_at) WHERE operation <>
+        'replace'` does this filtering server-side; this test pins the
+        query text and confirms the code passes the filtered answer through
+        unchanged."""
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots" '
+                "WHERE operation <> 'replace'": [[["2026-07-12 20:00:00.000 UTC"]]],
+            }
+        )
+
+        result = table_freshness(client, "job_info")
+
+        assert result == FreshnessResult(
+            table="job_info",
+            max_committed_at=datetime(2026, 7, 12, 20, 0, 0, tzinfo=timezone.utc),
+            missing=False,
+        )
+        assert result.is_stale(NOW, timedelta(hours=26)) is False
 
 
 class TestFreshnessResultIsStale:
@@ -620,7 +720,7 @@ class TestCheckFreshness:
     def test_one_result_per_core_table_in_order(self):
         client = ScriptedTrinoClient(
             {
-                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots" WHERE operation <> \'replace\'': [
                     [["2026-07-13 02:00:00.000 UTC"]]
                 ]
                 for t in CORE_FRESHNESS_TABLES
@@ -677,7 +777,7 @@ class TestRunFreshnessCheck:
 
         client = ScriptedTrinoClient(
             {
-                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots" WHERE operation <> \'replace\'': [
                     [["2026-07-13 02:00:00.000 UTC"]]
                 ]
                 for t in CORE_FRESHNESS_TABLES
@@ -696,12 +796,12 @@ class TestRunFreshnessCheck:
         import alice_ingest.maintenance as maintenance_module
 
         responses = {
-            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots" WHERE operation <> \'replace\'': [
                 [["2026-07-13 02:00:00.000 UTC"]]
             ]
             for t in CORE_FRESHNESS_TABLES
         }
-        responses['SELECT max(committed_at) FROM lake.alice."trace$snapshots"'] = [
+        responses['SELECT max(committed_at) FROM lake.alice."trace$snapshots" WHERE operation <> \'replace\''] = [
             [["2026-07-10 00:00:00.000 UTC"]]
         ]
         client = ScriptedTrinoClient(responses)
@@ -718,12 +818,12 @@ class TestRunFreshnessCheck:
         import alice_ingest.maintenance as maintenance_module
 
         responses = {
-            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots" WHERE operation <> \'replace\'': [
                 [["2026-07-13 02:00:00.000 UTC"]]
             ]
             for t in CORE_FRESHNESS_TABLES
         }
-        responses['SELECT max(committed_at) FROM lake.alice."mon_jdls_parsed$snapshots"'] = [
+        responses['SELECT max(committed_at) FROM lake.alice."mon_jdls_parsed$snapshots" WHERE operation <> \'replace\''] = [
             TrinoQueryError(
                 "{'message': \"Table 'lake.alice.mon_jdls_parsed' does not exist\", "
                 "'errorName': 'TABLE_NOT_FOUND'}"
@@ -743,7 +843,7 @@ class TestRunFreshnessCheck:
 
         # 25h old is stale under a 1h override, fresh under the 26h default.
         responses = {
-            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots" WHERE operation <> \'replace\'': [
                 [["2026-07-12 02:00:00.000 UTC"]]  # 25h before NOW
             ]
             for t in CORE_FRESHNESS_TABLES
@@ -762,7 +862,7 @@ class TestRunFreshnessCheck:
 
         client = ScriptedTrinoClient(
             {
-                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots" WHERE operation <> \'replace\'': [
                     [["2026-07-13 02:00:00.000 UTC"]]
                 ]
                 for t in CORE_FRESHNESS_TABLES
