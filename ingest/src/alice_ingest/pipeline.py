@@ -455,12 +455,51 @@ def run_apply_views(env: Mapping[str, str] | None = None, strict: bool = False) 
     return _run(env, strict=strict)
 
 
+def run_trino_maintenance_command(env: Mapping[str, str] | None = None) -> int:
+    """`run-trino-maintenance`: the weekly ingest-maintenance CronWorkflow's
+    second DAG step (Plan 3 Task 3), after the existing pyiceberg
+    `run-maintenance` step -- Trino `OPTIMIZE`/`expire_snapshots`/
+    `remove_orphan_files` per `alice.*` table (alice_ingest.maintenance's
+    module docstring)."""
+    env = env if env is not None else os.environ
+    try:
+        from alice_ingest.maintenance import run_trino as _run
+    except ModuleNotFoundError:
+        print(
+            "alice-ingest run-trino-maintenance: not implemented yet "
+            "(lands in Plan 3 Task 3, ingest/src/alice_ingest/maintenance.py)",
+            file=sys.stderr,
+        )
+        return 1
+    return _run(env)
+
+
+def run_check_freshness(env: Mapping[str, str] | None = None) -> int:
+    """`check-freshness`: the nightly ingest-nightly CronWorkflow's third DAG
+    step (Plan 3 Task 3), after `run-retention` -- the data-layer staleness
+    gate completing design D11 (alice_ingest.maintenance's module docstring,
+    "Data-layer freshness gate")."""
+    env = env if env is not None else os.environ
+    try:
+        from alice_ingest.maintenance import run_freshness_check as _run
+    except ModuleNotFoundError:
+        print(
+            "alice-ingest check-freshness: not implemented yet "
+            "(lands in Plan 3 Task 3, ingest/src/alice_ingest/maintenance.py)",
+            file=sys.stderr,
+        )
+        return 1
+    return _run(env)
+
+
 _COMMANDS = {
     "run-nightly": run_nightly,
     "run-sitesonar": run_sitesonar,
     "run-retention": run_retention,
     "run-maintenance": run_maintenance,
     "apply-views": run_apply_views,
+    "run-trino-maintenance": run_trino_maintenance_command,
+    "check-freshness": run_check_freshness,
 }
 
 

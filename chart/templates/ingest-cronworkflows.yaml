@@ -26,13 +26,21 @@ spec:
     # chart/values.yaml's ingest.activeDeadlineSeconds comment.
     activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds.nightly }}
     templates:
-      # 2-step DAG: run-retention only starts once run-nightly has
-      # Succeeded (brief: "retention only after successful ingest -- hard
-      # dependency"). Argo's default DAG semantics already enforce this --
-      # a task with `dependencies` does not start unless every dependency
-      # succeeded (no continueOn set here), and the DAG itself fails if
-      # run-nightly fails, so run-retention never executes against a
-      # partial/failed ingest.
+      # 3-step DAG (Plan 3 Task 3 adds check-freshness): run-retention only
+      # starts once run-nightly has Succeeded (brief: "retention only after
+      # successful ingest -- hard dependency"); check-freshness only starts
+      # once run-retention has Succeeded (brief: "check-freshness AFTER
+      # run-retention" -- design D11 completion, the data-layer staleness
+      # gate documented in alice_ingest.maintenance's module docstring,
+      # "Data-layer freshness gate"). Argo's default DAG semantics already
+      # enforce this -- a task with `dependencies` does not start unless
+      # every dependency succeeded (no continueOn set here), and the DAG
+      # itself fails if an earlier step fails, so check-freshness never runs
+      # against a partial/failed ingest or retention pass, and a stale/
+      # missing core table (check-freshness's own non-zero exit, maintenance.
+      # py's run_freshness_check()) fails this Workflow the same way -- both
+      # surface through the existing WorkflowFailed alert (datalake-alerts.
+      # yaml), no new alerting component needed.
       - name: main
         dag:
           tasks:
@@ -41,6 +49,9 @@ spec:
             - name: run-retention
               template: run-retention
               dependencies: [run-nightly]
+            - name: check-freshness
+              template: check-freshness
+              dependencies: [run-retention]
       - name: run-nightly
         container:
           image: {{ .Values.images.ingest }}
@@ -53,6 +64,12 @@ spec:
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-retention"]
+      - name: check-freshness
+        container:
+          image: {{ .Values.images.ingest }}
+          envFrom:
+            - secretRef: {name: ingest-env}
+          args: ["check-freshness"]
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
@@ -78,14 +95,20 @@ spec:
             - secretRef: {name: ingest-env}
           args: ["run-sitesonar"]
 ---
-# Plan 2 Task 5: weekly Iceberg snapshot expiry (design D12,
-# ingest/src/alice_ingest/maintenance.py -- `table.maintenance
-# .expire_snapshots().older_than(...).commit()`, verified live against the
-# pinned pyiceberg 0.11.1; see maintenance.py's module docstring). Same
-# schedules-list/pipeline-runner/ttlStrategy pattern as ingest-nightly and
-# ingest-sitesonar above. Single-step (no DAG needed): one command iterates
-# every alice.* table itself (dynamic `catalog.list_tables`), so there is
-# nothing else for this Workflow to sequence.
+# Plan 2 Task 5 / Plan 3 Task 3: weekly Iceberg maintenance -- pyiceberg
+# metadata-only snapshot expiry (design D12, ingest/src/alice_ingest/
+# maintenance.py -- `table.maintenance.expire_snapshots().older_than(...)
+# .commit()`, verified live against the pinned pyiceberg 0.11.1) followed by
+# Trino PHYSICAL maintenance (`ALTER TABLE ... EXECUTE optimize/
+# expire_snapshots/remove_orphan_files` per `alice.*` table -- the file-level
+# GC pyiceberg 0.11.1 cannot do; see maintenance.py's module docstring, both
+# sections). Same schedules-list/pipeline-runner/ttlStrategy pattern as
+# ingest-nightly and ingest-sitesonar above. 2-step DAG (Plan 3 Task 3):
+# run-trino-maintenance only starts once run-maintenance (pyiceberg) has
+# Succeeded (brief: "maintenance: after the pyiceberg step") -- expiring
+# pyiceberg's own snapshot metadata first means Trino's `expire_snapshots`/
+# `remove_orphan_files` pass has fewer stale snapshots left to reconcile,
+# though each step is independently safe to run alone (both are idempotent).
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
@@ -99,13 +122,30 @@ spec:
     entrypoint: main
     ttlStrategy: {secondsAfterCompletion: 86400}
     # Final-review N5 -- see ingest-nightly's activeDeadlineSeconds comment
-    # above. Shorter default (1h) than nightly/sitesonar: a single
-    # expire_snapshots() pass per alice.* table, no external HTTP fetch.
+    # above. Covers BOTH steps below (Plan 3 Task 3 extends this Workflow,
+    # not the deadline): the pyiceberg expire_snapshots() pass per alice.*
+    # table, then Trino's OPTIMIZE/expire_snapshots/remove_orphan_files pass
+    # per alice.* table (a real, HTTP-round-tripping SQL engine, slower per
+    # table than the metadata-only pyiceberg pass).
     activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds.maintenance }}
     templates:
       - name: main
+        dag:
+          tasks:
+            - name: run-maintenance
+              template: run-maintenance
+            - name: run-trino-maintenance
+              template: run-trino-maintenance
+              dependencies: [run-maintenance]
+      - name: run-maintenance
         container:
           image: {{ .Values.images.ingest }}
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-maintenance"]
+      - name: run-trino-maintenance
+        container:
+          image: {{ .Values.images.ingest }}
+          envFrom:
+            - secretRef: {name: ingest-env}
+          args: ["run-trino-maintenance"]

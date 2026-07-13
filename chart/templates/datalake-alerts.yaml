@@ -252,3 +252,61 @@ spec:
               rather than risk E4's class of data loss (deleting rows an
               interrupted/lagging ingest never finished writing).
             incident: E4
+
+        # Plan 3 Task 3 -- design D11 completion: the DATA-layer half of
+        # snapshot staleness. IcebergIngestStale above detects "the nightly
+        # CronWorkflow stopped firing at all" (a controller/schedule/RBAC
+        # problem); it cannot detect "the CronWorkflow fired, every step
+        # reported Succeeded, but no core table actually got a fresh Iceberg
+        # snapshot" -- a gap that class of failure would leave completely
+        # unalerted (Plan 2 Task 5's report: "D11 snapshot-staleness:
+        # documented as composite; data-layer check -> Plan 3"). ingest-
+        # nightly's third DAG step, check-freshness (chart/templates/ingest-
+        # cronworkflows.yaml), closes that gap: `alice_ingest.maintenance.
+        # run_freshness_check()` queries `max(committed_at)` from each core
+        # table's `"<table>$snapshots"` Trino metadata table and exits
+        # non-zero if any core table (job_info/trace/mon_jdls_parsed) is
+        # missing or its newest snapshot is older than 26h -- which fails
+        # the check-freshness container, which fails the owning ingest-
+        # nightly Workflow, the EXACT SAME Failed-phase transition
+        # WorkflowFailed above already detects. Same deliberate no-new-
+        # components decision as RetentionUnverifiedRows directly above:
+        # this alert's expr is identical to WorkflowFailed's (there is no
+        # per-workflow-name/per-step metric on this controller version to
+        # scope a narrower expr against -- see this group's header comment),
+        # so it will always co-fire with WorkflowFailed, never alone, for
+        # this specific cause among the several WorkflowFailed's broader
+        # condition can match. It exists as a separately named, runbook-
+        # linkable entry so "the data-layer freshness gate tripped" is
+        # discoverable by name rather than folded into WorkflowFailed's
+        # generic text. To CONFIRM staleness was the actual cause (vs. a
+        # different workflow, or ingest-nightly's run-nightly/run-retention
+        # steps, failing instead), check the failed check-freshness pod's
+        # logs for a `FRESHNESS table=<t> status=STALE|MISSING ...` line and
+        # the terminal `FRESHNESS CHECK FAILED: ...` summary (maintenance.py's
+        # format_freshness_summary()/run_freshness_check()).
+        - alert: IcebergSnapshotStale
+          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A pipeline workflow failed -- check whether the data-layer freshness gate (check-freshness) was the cause
+            description: >-
+              Deliberate no-new-components decision (Plan 3 Task 3): the
+              data-layer freshness gate (alice_ingest.maintenance.
+              run_freshness_check(), wired as ingest-nightly's third DAG step
+              `check-freshness`, chart/templates/ingest-cronworkflows.yaml)
+              exposes NO metric of its own -- it fails its own container on
+              staleness, which fails the owning Workflow, which this
+              PrometheusRule group already detects via WorkflowFailed. This
+              alert has NO independent Prometheus signal: same expr as
+              WorkflowFailed, always co-firing with it, never alone, for
+              this specific cause among WorkflowFailed's broader condition.
+              A core table (job_info/trace/mon_jdls_parsed) reads STALE when
+              its newest Iceberg snapshot (`max(committed_at)` from
+              `lake.alice."<table>$snapshots"`) is older than 26h, or
+              MISSING if the table has no snapshot at all -- either means
+              the data-layer has nothing recent to show even if every
+              upstream step reported success.
+            incident: E4

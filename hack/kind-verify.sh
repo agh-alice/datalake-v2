@@ -130,13 +130,16 @@ fi
 # loaded alongside the original `datalake` group's LandingDBXidAgeHigh --
 # proves BOTH groups in the same PrometheusRule resource hydrated, not just
 # whichever group happened to already be present before Task 5.
+# Extended again (Plan 3 Task 3): IcebergSnapshotStale (the data-layer
+# freshness gate's alert, design D11 completion) must load alongside them.
 PROM_STS=$(kubectl -n monitoring get sts -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}')
 RULES_JSON=$(kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
      wget -qO- 'http://localhost:9090/api/v1/rules')
-if echo "$RULES_JSON" | grep -q LandingDBXidAgeHigh && echo "$RULES_JSON" | grep -q WorkflowFailed; then
-  echo "alert rules loaded (datalake + datalake-pipeline groups)"
+if echo "$RULES_JSON" | grep -q LandingDBXidAgeHigh && echo "$RULES_JSON" | grep -q WorkflowFailed \
+   && echo "$RULES_JSON" | grep -q IcebergSnapshotStale; then
+  echo "alert rules loaded (datalake + datalake-pipeline groups, incl. IcebergSnapshotStale)"
 else
-  echo "FAIL: datalake alert rules not loaded in Prometheus (LandingDBXidAgeHigh and/or WorkflowFailed missing)"; exit 1
+  echo "FAIL: datalake alert rules not loaded in Prometheus (LandingDBXidAgeHigh and/or WorkflowFailed and/or IcebergSnapshotStale missing)"; exit 1
 fi
 # Manual Workflow run using the same image the CronWorkflow uses (Task 7) --
 # the CronWorkflow itself ticks every 5m; this proves the pipeline-runner SA

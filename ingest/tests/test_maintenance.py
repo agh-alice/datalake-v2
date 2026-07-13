@@ -1,4 +1,5 @@
-"""TDD for alice_ingest.maintenance (Plan 2 Task 5).
+"""TDD for alice_ingest.maintenance (Plan 2 Task 5; Plan 3 Task 3 extends this
+module with Trino physical maintenance + the data-layer freshness gate).
 
 Written BEFORE alice_ingest/maintenance.py exists -- first run must be RED
 (collection error: `ModuleNotFoundError: No module named 'alice_ingest.maintenance'`).
@@ -13,6 +14,20 @@ maintenance API SHAPE itself (`table.maintenance.expire_snapshots()
 fakes mirror that verified interface shape (a `.maintenance` property
 returning an object with `.expire_snapshots()` -> a builder with
 `.older_than(dt)` (chainable) and `.commit()`), not pyiceberg's internals.
+
+Plan 3 Task 3 section (below TestNoBlockedAlternativeNeeded): Trino physical
+maintenance (`ALTER TABLE ... EXECUTE optimize/expire_snapshots/
+remove_orphan_files`) and the nightly data-layer freshness gate
+(`max(committed_at)` from each core table's `"<table>$snapshots"` metadata
+table). Exact procedure syntax, the 7d retention floor, and the vended-
+credentials S3 LIST permission for `remove_orphan_files` were all verified
+LIVE against the pinned Trino 476 on this kind cluster, 2026-07-12/13 -- see
+maintenance.py's module docstring for the verification trail (docs page
+https://trino.io/docs/476/connector/iceberg.html cross-checked against a real
+probe pod). These tests exercise the pure orchestration logic against a
+scripted fake Trino client (`ScriptedTrinoClient`, exact-SQL-keyed, mirrors
+the FakeTrinoClient/FakeShowColumnsClient pattern already established in
+test_views.py) -- no live Trino needed.
 """
 
 from __future__ import annotations
@@ -22,13 +37,28 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from alice_ingest.maintenance import (
+    CORE_FRESHNESS_TABLES,
+    DEFAULT_FRESHNESS_MAX_AGE_HOURS,
     DEFAULT_MAINTENANCE_OLDER_THAN_DAYS,
+    DEFAULT_TRINO_MAINTENANCE_RETENTION_THRESHOLD,
+    FreshnessResult,
     TableMaintenanceResult,
+    TrinoMaintenanceResult,
+    check_freshness,
     expire_table_snapshots,
+    format_freshness_summary,
     format_table_summary,
+    format_trino_maintenance_summary,
     list_alice_tables,
+    list_trino_alice_tables,
     run,
+    run_freshness_check,
+    run_trino,
+    run_trino_maintenance,
+    run_trino_table_maintenance,
+    table_freshness,
 )
+from alice_ingest.views import TrinoQueryError
 
 
 class FakeExpireSnapshotsBuilder:
@@ -268,3 +298,473 @@ class TestNoBlockedAlternativeNeeded:
         run({})
 
         assert "no expiry API" not in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Plan 3 Task 3: Trino physical maintenance (`ALTER TABLE ... EXECUTE
+# optimize/expire_snapshots/remove_orphan_files`) -- the load-bearing
+# physical GC pyiceberg 0.11.1 cannot do (module docstring, "Scope note").
+# Exact procedure syntax + the 7d retention floor verified LIVE against the
+# pinned Trino 476 (docs page https://trino.io/docs/476/connector/
+# iceberg.html cross-checked against a real probe pod, 2026-07-12/13):
+#   ALTER TABLE <t> EXECUTE optimize
+#   ALTER TABLE <t> EXECUTE expire_snapshots(retention_threshold => '7d')
+#   ALTER TABLE <t> EXECUTE remove_orphan_files(retention_threshold => '7d')
+# `iceberg.expire-snapshots.min-retention` / `iceberg.remove-orphan-files.
+# min-retention` both default to 7d on this Trino -- retention_threshold =>
+# '7d' is therefore exactly AT the floor (proven live: '7d' succeeds, '0s'
+# fails with INVALID_PROCEDURE_ARGUMENT), so DEFAULT_TRINO_MAINTENANCE_
+# RETENTION_THRESHOLD stays '7d' with no session-property override needed in
+# production. `remove_orphan_files` succeeding at all (against a real
+# alice.job_info table, and again against a dedicated scratch table with a
+# session-property-overridden 0s floor) is itself the proof that Lakekeeper's
+# vended S3 credentials permit LIST, not just PUT/GET (unproven before this
+# task, per the brief) -- physical file counts genuinely dropped after
+# remove_orphan_files and were UNCHANGED after expire_snapshots alone
+# (metadata-only), live-verified against MinIO directly via s3fs with the
+# harness's root credentials.
+# ---------------------------------------------------------------------------
+
+
+class ScriptedTrinoClient:
+    """Records every executed statement; returns per-statement canned rows
+    keyed by exact SQL text, FIFO per key (so the same SQL issued twice --
+    e.g. a `$files` count before and after maintenance -- can return two
+    different canned values in call order). A canned value that is an
+    Exception instance is raised instead of returned, for the missing-table
+    freshness case. An unscripted statement raises AssertionError rather
+    than silently returning [] -- a forgotten script entry must fail loudly,
+    not look like an empty result set."""
+
+    def __init__(self, responses: dict[str, list]):
+        self._responses = {sql: list(values) for sql, values in responses.items()}
+        self.statements: list[str] = []
+
+    def run(self, sql: str, poll_interval: float = 1.0):
+        self.statements.append(sql)
+        queue = self._responses.get(sql)
+        if not queue:
+            raise AssertionError(f"unscripted statement: {sql!r}")
+        value = queue.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+class TestListTrinoAliceTables:
+    def test_returns_sorted_table_names_from_show_tables(self):
+        client = ScriptedTrinoClient(
+            {
+                "SHOW TABLES FROM lake.alice": [
+                    [["mon_jdls_parsed"], ["job_info"], ["trace"]]
+                ],
+            }
+        )
+
+        result = list_trino_alice_tables(client)
+
+        assert result == ["job_info", "mon_jdls_parsed", "trace"]
+
+
+class TestRunTrinoTableMaintenance:
+    def test_runs_optimize_then_expire_then_remove_orphan_in_order(self):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT count(*) FROM lake.alice."job_info$files"': [[[5]], [[1]]],
+                "ALTER TABLE lake.alice.job_info EXECUTE optimize": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE expire_snapshots(retention_threshold => '7d')": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE remove_orphan_files(retention_threshold => '7d')": [[]],
+            }
+        )
+
+        result = run_trino_table_maintenance(client, "job_info")
+
+        assert client.statements == [
+            'SELECT count(*) FROM lake.alice."job_info$files"',
+            "ALTER TABLE lake.alice.job_info EXECUTE optimize",
+            "ALTER TABLE lake.alice.job_info EXECUTE expire_snapshots(retention_threshold => '7d')",
+            "ALTER TABLE lake.alice.job_info EXECUTE remove_orphan_files(retention_threshold => '7d')",
+            'SELECT count(*) FROM lake.alice."job_info$files"',
+        ]
+        assert result == TrinoMaintenanceResult(table="job_info", files_before=5, files_after=1)
+        assert result.files_removed == 4
+
+    def test_honors_a_non_default_retention_threshold(self):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT count(*) FROM lake.alice."trace$files"': [[[2]], [[2]]],
+                "ALTER TABLE lake.alice.trace EXECUTE optimize": [[]],
+                "ALTER TABLE lake.alice.trace EXECUTE expire_snapshots(retention_threshold => '14d')": [[]],
+                "ALTER TABLE lake.alice.trace EXECUTE remove_orphan_files(retention_threshold => '14d')": [[]],
+            }
+        )
+
+        result = run_trino_table_maintenance(client, "trace", retention_threshold="14d")
+
+        assert result.files_removed == 0
+
+
+class TestFormatTrinoMaintenanceSummary:
+    def test_matches_the_documented_per_table_log_format(self):
+        result = TrinoMaintenanceResult(table="job_info", files_before=5, files_after=1)
+
+        assert format_trino_maintenance_summary(result) == (
+            "TRINO MAINTENANCE table=job_info files_before=5 files_after=1 files_removed=4"
+        )
+
+
+class TestRunTrinoMaintenance:
+    def test_iterates_every_table_in_sorted_order_and_prints_a_summary_each(self, capsys):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT count(*) FROM lake.alice."job_info$files"': [[[3]], [[1]]],
+                "ALTER TABLE lake.alice.job_info EXECUTE optimize": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE expire_snapshots(retention_threshold => '7d')": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE remove_orphan_files(retention_threshold => '7d')": [[]],
+                'SELECT count(*) FROM lake.alice."trace$files"': [[[2]], [[2]]],
+                "ALTER TABLE lake.alice.trace EXECUTE optimize": [[]],
+                "ALTER TABLE lake.alice.trace EXECUTE expire_snapshots(retention_threshold => '7d')": [[]],
+                "ALTER TABLE lake.alice.trace EXECUTE remove_orphan_files(retention_threshold => '7d')": [[]],
+            }
+        )
+
+        results = run_trino_maintenance(client, ["trace", "job_info"])
+
+        assert [r.table for r in results] == ["job_info", "trace"]
+        out = capsys.readouterr().out
+        assert "TRINO MAINTENANCE table=job_info files_before=3 files_after=1 files_removed=2" in out
+        assert "TRINO MAINTENANCE table=trace files_before=2 files_after=2 files_removed=0" in out
+
+
+class TestRunTrino:
+    def test_requires_trino_uri_env_var(self):
+        with pytest.raises(SystemExit, match="TRINO_URI"):
+            run_trino({})
+
+    def test_no_tables_found_is_reported_and_not_an_error(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        client = ScriptedTrinoClient({"SHOW TABLES FROM lake.alice": [[]]})
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_trino({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        assert "TRINO MAINTENANCE SKIPPED: no tables found" in capsys.readouterr().out
+
+    def test_happy_path_maintains_every_discovered_table(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        client = ScriptedTrinoClient(
+            {
+                "SHOW TABLES FROM lake.alice": [[["job_info"]]],
+                'SELECT count(*) FROM lake.alice."job_info$files"': [[[4]], [[2]]],
+                "ALTER TABLE lake.alice.job_info EXECUTE optimize": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE expire_snapshots(retention_threshold => '7d')": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE remove_orphan_files(retention_threshold => '7d')": [[]],
+            }
+        )
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_trino({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "TRINO MAINTENANCE table=job_info files_before=4 files_after=2 files_removed=2" in out
+        assert "TRINO MAINTENANCE tables=1 total_files_removed=2" in out
+
+    def test_honors_retention_threshold_env_override(self, monkeypatch):
+        import alice_ingest.maintenance as maintenance_module
+
+        client = ScriptedTrinoClient(
+            {
+                "SHOW TABLES FROM lake.alice": [[["job_info"]]],
+                'SELECT count(*) FROM lake.alice."job_info$files"': [[[1]], [[1]]],
+                "ALTER TABLE lake.alice.job_info EXECUTE optimize": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE expire_snapshots(retention_threshold => '3d')": [[]],
+                "ALTER TABLE lake.alice.job_info EXECUTE remove_orphan_files(retention_threshold => '3d')": [[]],
+            }
+        )
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_trino(
+            {"TRINO_URI": "http://trino.trino.svc:8080", "TRINO_MAINTENANCE_RETENTION_THRESHOLD": "3d"}
+        )
+
+        assert exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Plan 3 Task 3: data-layer freshness gate (design D11 completion). Nightly
+# workflow's final `check-freshness` step: `max(committed_at)` from each core
+# table's `"<table>$snapshots"` metadata table (column name + table naming
+# verified live against Trino 476, 2026-07-12: `SELECT max(committed_at)
+# FROM lake.alice."job_info$snapshots"` returned e.g.
+# `[['2026-07-12 19:40:03.327 UTC']]`), stale if older than 26h (24h nightly
+# cadence + 2h buffer, matching the existing IcebergIngestStale alert's
+# window in datalake-alerts.yaml). Injected clock (`now` parameter) --
+# stale/fresh/missing-table cases below never touch a real clock.
+# ---------------------------------------------------------------------------
+
+
+NOW = datetime(2026, 7, 13, 3, 0, tzinfo=timezone.utc)
+
+
+class TestParseTrinoTimestamp:
+    def test_parses_the_live_verified_wire_format(self):
+        from alice_ingest.maintenance import _parse_trino_timestamp
+
+        result = _parse_trino_timestamp("2026-07-12 19:40:03.327 UTC")
+
+        assert result == datetime(2026, 7, 12, 19, 40, 3, 327000, tzinfo=timezone.utc)
+
+    def test_rejects_a_non_utc_wire_value(self):
+        from alice_ingest.maintenance import _parse_trino_timestamp
+
+        with pytest.raises(ValueError, match="UTC"):
+            _parse_trino_timestamp("2026-07-12 19:40:03.327 CEST")
+
+
+class TestTableFreshness:
+    def test_fresh_table_reports_its_max_committed_at(self):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [
+                    [["2026-07-13 02:00:00.000 UTC"]]
+                ],
+            }
+        )
+
+        result = table_freshness(client, "job_info")
+
+        assert result == FreshnessResult(
+            table="job_info",
+            max_committed_at=datetime(2026, 7, 13, 2, 0, 0, tzinfo=timezone.utc),
+            missing=False,
+        )
+
+    def test_missing_table_is_reported_as_missing_not_raised(self):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [
+                    TrinoQueryError(
+                        "{'message': \"line 1:32: Table 'lake.alice.job_info' does not exist\", "
+                        "'errorName': 'TABLE_NOT_FOUND'}"
+                    )
+                ],
+            }
+        )
+
+        result = table_freshness(client, "job_info")
+
+        assert result == FreshnessResult(table="job_info", max_committed_at=None, missing=True)
+
+    def test_table_with_zero_snapshots_reports_null_not_missing(self):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [[[None]]],
+            }
+        )
+
+        result = table_freshness(client, "job_info")
+
+        assert result == FreshnessResult(table="job_info", max_committed_at=None, missing=False)
+
+    def test_a_different_trino_query_error_is_not_swallowed(self):
+        client = ScriptedTrinoClient(
+            {
+                'SELECT max(committed_at) FROM lake.alice."job_info$snapshots"': [
+                    TrinoQueryError("{'message': 'PERMISSION_DENIED', 'errorName': 'PERMISSION_DENIED'}")
+                ],
+            }
+        )
+
+        with pytest.raises(TrinoQueryError, match="PERMISSION_DENIED"):
+            table_freshness(client, "job_info")
+
+
+class TestFreshnessResultIsStale:
+    def test_missing_table_is_always_stale(self):
+        result = FreshnessResult(table="job_info", max_committed_at=None, missing=True)
+
+        assert result.is_stale(NOW, timedelta(hours=26)) is True
+
+    def test_null_snapshot_max_is_always_stale(self):
+        result = FreshnessResult(table="job_info", max_committed_at=None, missing=False)
+
+        assert result.is_stale(NOW, timedelta(hours=26)) is True
+
+    def test_within_max_age_is_fresh(self):
+        result = FreshnessResult(table="job_info", max_committed_at=NOW - timedelta(hours=1), missing=False)
+
+        assert result.is_stale(NOW, timedelta(hours=26)) is False
+
+    def test_beyond_max_age_is_stale(self):
+        result = FreshnessResult(table="job_info", max_committed_at=NOW - timedelta(hours=27), missing=False)
+
+        assert result.is_stale(NOW, timedelta(hours=26)) is True
+
+    def test_exactly_at_the_boundary_is_not_yet_stale(self):
+        result = FreshnessResult(table="job_info", max_committed_at=NOW - timedelta(hours=26), missing=False)
+
+        assert result.is_stale(NOW, timedelta(hours=26)) is False
+
+
+class TestCheckFreshness:
+    def test_one_result_per_core_table_in_order(self):
+        client = ScriptedTrinoClient(
+            {
+                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                    [["2026-07-13 02:00:00.000 UTC"]]
+                ]
+                for t in CORE_FRESHNESS_TABLES
+            }
+        )
+
+        results = check_freshness(client, NOW)
+
+        assert [r.table for r in results] == list(CORE_FRESHNESS_TABLES)
+
+    def test_default_core_tables_are_job_info_trace_mon_jdls_parsed(self):
+        assert CORE_FRESHNESS_TABLES == ("job_info", "trace", "mon_jdls_parsed")
+
+    def test_default_max_age_is_26_hours(self):
+        assert DEFAULT_FRESHNESS_MAX_AGE_HOURS == "26"
+
+
+class TestFormatFreshnessSummary:
+    def test_fresh_table_format(self):
+        result = FreshnessResult(
+            table="job_info", max_committed_at=NOW - timedelta(hours=1), missing=False
+        )
+
+        line = format_freshness_summary(result, NOW, timedelta(hours=26))
+
+        assert line.startswith("FRESHNESS table=job_info status=FRESH")
+        assert "age_hours=1.00" in line
+
+    def test_stale_table_format(self):
+        result = FreshnessResult(
+            table="job_info", max_committed_at=NOW - timedelta(hours=30), missing=False
+        )
+
+        line = format_freshness_summary(result, NOW, timedelta(hours=26))
+
+        assert line.startswith("FRESHNESS table=job_info status=STALE")
+        assert "age_hours=30.00" in line
+
+    def test_missing_table_format(self):
+        result = FreshnessResult(table="job_info", max_committed_at=None, missing=True)
+
+        line = format_freshness_summary(result, NOW, timedelta(hours=26))
+
+        assert line == "FRESHNESS table=job_info status=MISSING"
+
+
+class TestRunFreshnessCheck:
+    def test_requires_trino_uri_env_var(self):
+        with pytest.raises(SystemExit, match="TRINO_URI"):
+            run_freshness_check({})
+
+    def test_all_fresh_exits_zero(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        client = ScriptedTrinoClient(
+            {
+                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                    [["2026-07-13 02:00:00.000 UTC"]]
+                ]
+                for t in CORE_FRESHNESS_TABLES
+            }
+        )
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_freshness_check({"TRINO_URI": "http://trino.trino.svc:8080"}, now=NOW)
+
+        assert exit_code == 0
+        out = capsys.readouterr().out
+        assert "FRESHNESS CHECK OK" in out
+        assert out.count("status=FRESH") == 3
+
+    def test_one_stale_table_exits_nonzero(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        responses = {
+            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                [["2026-07-13 02:00:00.000 UTC"]]
+            ]
+            for t in CORE_FRESHNESS_TABLES
+        }
+        responses['SELECT max(committed_at) FROM lake.alice."trace$snapshots"'] = [
+            [["2026-07-10 00:00:00.000 UTC"]]
+        ]
+        client = ScriptedTrinoClient(responses)
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_freshness_check({"TRINO_URI": "http://trino.trino.svc:8080"}, now=NOW)
+
+        assert exit_code == 1
+        out = capsys.readouterr().out
+        assert "FRESHNESS CHECK FAILED" in out
+        assert "table=trace status=STALE" in out
+
+    def test_missing_table_exits_nonzero(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        responses = {
+            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                [["2026-07-13 02:00:00.000 UTC"]]
+            ]
+            for t in CORE_FRESHNESS_TABLES
+        }
+        responses['SELECT max(committed_at) FROM lake.alice."mon_jdls_parsed$snapshots"'] = [
+            TrinoQueryError(
+                "{'message': \"Table 'lake.alice.mon_jdls_parsed' does not exist\", "
+                "'errorName': 'TABLE_NOT_FOUND'}"
+            )
+        ]
+        client = ScriptedTrinoClient(responses)
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_freshness_check({"TRINO_URI": "http://trino.trino.svc:8080"}, now=NOW)
+
+        assert exit_code == 1
+        out = capsys.readouterr().out
+        assert "table=mon_jdls_parsed status=MISSING" in out
+
+    def test_honors_freshness_max_age_hours_env_override(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        # 25h old is stale under a 1h override, fresh under the 26h default.
+        responses = {
+            f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                [["2026-07-12 02:00:00.000 UTC"]]  # 25h before NOW
+            ]
+            for t in CORE_FRESHNESS_TABLES
+        }
+        client = ScriptedTrinoClient(responses)
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+
+        exit_code = run_freshness_check(
+            {"TRINO_URI": "http://trino.trino.svc:8080", "FRESHNESS_MAX_AGE_HOURS": "1"}, now=NOW
+        )
+
+        assert exit_code == 1
+
+    def test_default_now_comes_from_the_now_seam_when_not_injected(self, monkeypatch, capsys):
+        import alice_ingest.maintenance as maintenance_module
+
+        client = ScriptedTrinoClient(
+            {
+                f'SELECT max(committed_at) FROM lake.alice."{t}$snapshots"': [
+                    [["2026-07-13 02:00:00.000 UTC"]]
+                ]
+                for t in CORE_FRESHNESS_TABLES
+            }
+        )
+        monkeypatch.setattr(maintenance_module, "TrinoClient", lambda base_uri: client)
+        monkeypatch.setattr(maintenance_module, "_now", lambda: NOW)
+
+        exit_code = run_freshness_check({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0

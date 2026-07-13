@@ -313,3 +313,81 @@ class TestApplyViewsStrictFlagWiring:
 
         assert exit_code == 0
         assert captured["strict"] is True
+
+
+class TestTrinoMaintenanceAndFreshnessCommandsWiring:
+    """Plan 3 Task 3: `run-trino-maintenance` (weekly ingest-maintenance
+    CronWorkflow's second DAG step, after the existing pyiceberg
+    `run-maintenance` step) and `check-freshness` (nightly ingest-nightly
+    CronWorkflow's third DAG step, after `run-retention`) -- same
+    `_COMMANDS` dispatch pattern as every other CLI command here."""
+
+    def test_run_trino_maintenance_is_a_registered_command(self):
+        from alice_ingest.pipeline import _COMMANDS
+
+        assert "run-trino-maintenance" in _COMMANDS
+
+    def test_check_freshness_is_a_registered_command(self):
+        from alice_ingest.pipeline import _COMMANDS
+
+        assert "check-freshness" in _COMMANDS
+
+    def test_main_dispatches_run_trino_maintenance(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        calls = []
+        monkeypatch.setitem(
+            pipeline_module._COMMANDS, "run-trino-maintenance", lambda: calls.append("called") or 0
+        )
+
+        exit_code = pipeline_module.main(["run-trino-maintenance"])
+
+        assert exit_code == 0
+        assert calls == ["called"]
+
+    def test_main_dispatches_check_freshness(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        calls = []
+        monkeypatch.setitem(pipeline_module._COMMANDS, "check-freshness", lambda: calls.append("called") or 0)
+
+        exit_code = pipeline_module.main(["check-freshness"])
+
+        assert exit_code == 0
+        assert calls == ["called"]
+
+    def test_run_trino_maintenance_command_delegates_to_maintenance_run_trino(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        captured = {}
+
+        class FakeMaintenanceModule:
+            @staticmethod
+            def run_trino(env):
+                captured["env"] = env
+                return 0
+
+        monkeypatch.setitem(sys.modules, "alice_ingest.maintenance", FakeMaintenanceModule)
+
+        exit_code = pipeline_module.run_trino_maintenance_command(env={"TRINO_URI": "x"})
+
+        assert exit_code == 0
+        assert captured["env"] == {"TRINO_URI": "x"}
+
+    def test_check_freshness_command_delegates_to_maintenance_run_freshness_check(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        captured = {}
+
+        class FakeMaintenanceModule:
+            @staticmethod
+            def run_freshness_check(env):
+                captured["env"] = env
+                return 0
+
+        monkeypatch.setitem(sys.modules, "alice_ingest.maintenance", FakeMaintenanceModule)
+
+        exit_code = pipeline_module.run_check_freshness(env={"TRINO_URI": "x"})
+
+        assert exit_code == 0
+        assert captured["env"] == {"TRINO_URI": "x"}
