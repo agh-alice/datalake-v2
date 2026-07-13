@@ -108,8 +108,11 @@ spec:
                       print("ECHO-RECEIVER POST path=" + self.path, flush=True)
                       print(body.decode("utf-8", "replace"), flush=True)
                       self.send_response(200)
-                      self.send_header("Content-Length", "0")
+                      # Alertmanager's Slack notifier requires literal "ok" or {"ok":true} in response body
+                      response_body = b"ok"
+                      self.send_header("Content-Length", str(len(response_body)))
                       self.end_headers()
+                      self.wfile.write(response_body)
 
                   def log_message(self, fmt, *args):
                       pass

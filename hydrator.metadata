@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "6c34d91bca00e496801549b0451636a949bf8f39",
+  "drySha": "ada2aa0ab0d1e3ad9fd4521ebe1e6fbf92e6efa4",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T13:20:00Z",
-  "subject": "feat: alerting activation prep -- echo-receiver, chronic-failure + staleness alerts",
-  "body": "Plan 4 Task T2S1 prework. New kind-only echo-receiver (values-gated\nechoReceiver.enabled, chart/templates/echo-receiver.yaml) stands in for a\nreal Slack webhook so the Alertmanager route/group/inhibit/receiver\npipeline (apps/infra/monitoring.yaml, separate commit) is end-to-end\ntestable without a Slack workspace.\n\nNew PrometheusRule alerts in the datalake-pipeline group:\n- WorkflowChronicFailure (>=3 Failed/Error in 7d, critical) -- the\n  E1-streak escalation the P2 Task 5 review demanded.\n- SiteSonarStale / IcebergMaintenanceStale -- trigger-staleness follow-up\n  for the two CronWorkflows the original alert set never covered\n  (P2-final follow-up). IcebergMaintenanceStale's annotation documents the\n  deferral blind spot honestly (P3-final ride-along): a chronically\n  deferring run-trino-maintenance still triggers on schedule and exits 0,\n  so no Prometheus signal in this stack (verified live: no Trino/Iceberg\n  exporter exists) can currently distinguish \"ran for real\" from\n  \"deferred\" without a new component -- deliberately not added here.\n"
+  "date": "2026-07-13T13:57:27Z",
+  "subject": "fix: echo-receiver must return 'ok' body - empty 200 fails Alertmanager's Slack parser (review important)",
+  "body": "Alertmanager's Slack notifier parser requires a literal 'ok' or JSON {\"ok\":true}\nin the response body. Empty 200 responses cause delivery-failed logs and an\nunresolvable AlertmanagerFailedToSendAlerts critical alert loop.\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n"
 }
