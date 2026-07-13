@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "aebc6f094b8779530f9efa40ca74019277e39e36",
+  "drySha": "48774a286e10ae3840a8e6088e18b1ea8ecd8d52",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T02:04:44Z",
-  "subject": "chore: pin ingest image digest for maintenance.py docstring update",
-  "body": "CI run 29218647381 (commit 49c3fb7, docs wave touching maintenance.py's\noverlap-guard docstring note -- ingest/** changed, so a new image built\neven though the change is docstring-only). Digest verified resolvable via\nthe GHCR registry API.\n"
+  "date": "2026-07-13T03:29:29Z",
+  "subject": "fix: digest-pin the Trino image + cyfronet bootstrap notes (final-review R3-R4)",
+  "body": "R3: apps/infra/trino.yaml's values: block now pins image.digest to\ntrinodb/trino:476's manifest-list digest (E2 founding lesson -- no\nmutable tags, chart 1.40.0 supports image.digest overriding\nimage.tag). Resolved two ways, both agreeing: `docker buildx\nimagetools inspect trinodb/trino:476` and the Docker Hub registry v2\nAPI (anonymous pull token, docker-content-digest header) ->\nsha256:00125e40.... Verified live: `helm template` against the\nextracted values block renders `trinodb/trino@sha256:00125e40...`\nfor both coordinator and (would-be) worker images. Same digest-pin\nshape already used for chart/values.yaml's ingest/busybox images and\nchart/templates/{landing,lakekeeper}-db.yaml's CNPG image.\n\nR4: docs/runbooks/bootstrap-cyfronet.md's Trino notes gain (a) a\nre-pin-digest reminder folded into the existing chart/CPU\nre-evaluation bullet, and (b) a new bullet naming the three\nkind-only values hardcoded in apps/infra/trino.yaml that cyfronet\nMUST override (s3.endpoint, s3.region, server.workers) -- bootstrap\napplies apps/infra/ verbatim with no per-environment overlay for\nthis Application, and the loud failure mode if an operator misses\none is cyfronet-verify's Trino query gate (SHOW CATALOGS / row-count\nprobes against the live coordinator).\n"
 }
