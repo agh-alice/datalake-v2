@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "ada2aa0ab0d1e3ad9fd4521ebe1e6fbf92e6efa4",
+  "drySha": "f03be47f3e8dc26c2855fdd4ea69f115202b1504",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T13:57:27Z",
-  "subject": "fix: echo-receiver must return 'ok' body - empty 200 fails Alertmanager's Slack parser (review important)",
-  "body": "Alertmanager's Slack notifier parser requires a literal 'ok' or JSON {\"ok\":true}\nin the response body. Empty 200 responses cause delivery-failed logs and an\nunresolvable AlertmanagerFailedToSendAlerts critical alert loop.\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\n"
+  "date": "2026-07-13T14:47:14Z",
+  "subject": "chore: pin ingest image digest for the dress-rehearsal fix wave",
+  "body": "Digest 8655c77b resolved from GHCR for commit 4677c62 (escaped-JDL decode\n+ subtractive drift detection) and verified via buildx imagetools inspect.\n"
 }
