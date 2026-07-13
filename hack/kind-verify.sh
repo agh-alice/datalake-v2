@@ -349,6 +349,37 @@ spec:
                       time.sleep(delay)
               raise RuntimeError(f"query never succeeded after {attempts} attempts: {last_err}")
 
+          # Hard gate (Plan 3 Task 5, Task 1 fixer follow-up): SHOW CATALOGS
+          # must be EXACTLY lake/landing/system -- no resurrected tpch/tpcds
+          # demo catalogs. apps/infra/trino.yaml nulls them out
+          # (tpch: null, tpcds: null) to drop the chart's own defaults, but
+          # that null-valued-key removal is fragile against ArgoCD's sync
+          # mechanics: a kubectl-replace/fresh-create renders and applies
+          # the full desired state cleanly, while a plain kubectl-apply
+          # JSON-merge-patch against an EXISTING Application object
+          # silently DROPS null-valued keys from the patch instead of
+          # deleting the corresponding live key -- which would resurrect
+          # the chart-default tpch/tpcds catalogs on an idempotent kind-up.sh
+          # rerun even though they're absent from a from-scratch clean-room
+          # create (git-tracked as a fixer's operational-gotcha note, Task 1
+          # follow-up). NOTE: no backtick characters in this comment block
+          # either, same reason as the note further down this same unquoted
+          # heredoc -- kubectl and apply above are deliberately joined with
+          # a hyphen instead of wrapped in backticks. "system" is Trino's
+          # own always-present built-in catalog (runtime/metadata
+          # introspection), not something this repo configures -- its
+          # presence here is expected, not a leak.
+          catalog_rows = run_query("SHOW CATALOGS")
+          catalogs = sorted(row[0] for row in catalog_rows)
+          print(f"SHOW CATALOGS -> {catalogs}")
+          if catalogs != ["lake", "landing", "system"]:
+              print(
+                  f"FAIL: SHOW CATALOGS returned {catalogs}, expected exactly "
+                  f"['lake', 'landing', 'system'] -- demo catalog "
+                  f"(tpch/tpcds) regression?"
+              )
+              sys.exit(1)
+
           lake_rows = run_query("SELECT count(*) FROM lake.alice.job_info")
           lake_count = lake_rows[0][0]
           print(f"lake.alice.job_info count={lake_count}")
@@ -408,7 +439,7 @@ TRINO_PROBE_LOG=$(kubectl -n trino logs trino-query-probe 2>/dev/null || echo ""
 kubectl -n trino delete pod trino-query-probe --ignore-not-found >/dev/null 2>&1
 echo "$TRINO_PROBE_LOG"
 if [ "$phase" = "Succeeded" ] && echo "$TRINO_PROBE_LOG" | grep -q "trino-query-probe: OK"; then
-  echo "trino query probes OK (lake.alice.job_info >=900 rows, landing.public.job_info SELECT succeeds, lake.contract.mon_jdls_parsed LPMPassName/TTL/Packages return data, lake.contract.job_info count matches lake.alice.job_info)"
+  echo "trino query probes OK (SHOW CATALOGS = lake/landing/system exactly, lake.alice.job_info >=900 rows, landing.public.job_info SELECT succeeds, lake.contract.mon_jdls_parsed LPMPassName/TTL/Packages return data, lake.contract.job_info count matches lake.alice.job_info)"
 else
   echo "FAIL: trino-query-probe phase=$phase"; exit 1
 fi
