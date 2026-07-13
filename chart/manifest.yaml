@@ -69,6 +69,71 @@ subjects:
     name: pipeline-runner
     namespace: argo-workflows
 ---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-receiver
+  namespace: monitoring
+spec:
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: echo-receiver
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-receiver
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-receiver
+  template:
+    metadata:
+      labels:
+        app: echo-receiver
+    spec:
+      containers:
+        - args:
+            - |
+              import http.server
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      length = int(self.headers.get("Content-Length", 0) or 0)
+                      body = self.rfile.read(length)
+                      print("ECHO-RECEIVER POST path=" + self.path, flush=True)
+                      print(body.decode("utf-8", "replace"), flush=True)
+                      self.send_response(200)
+                      self.send_header("Content-Length", "0")
+                      self.end_headers()
+
+                  def log_message(self, fmt, *args):
+                      pass
+
+              http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+          command:
+            - python3
+            - -c
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:44445364308323a64ed9ad69f12c5b7cf6094bed2ed9f443f0ce635047cdff45
+          name: echo-receiver
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            tcpSocket:
+              port: 8080
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 10m
+              memory: 32Mi
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -332,6 +397,33 @@ spec:
             incident: E4
             summary: A pipeline workflow failed -- check whether the data-layer freshness gate (check-freshness) was the cause
           expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          for: 5m
+          labels:
+            severity: warning
+        - alert: WorkflowChronicFailure
+          annotations:
+            description: argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"} has accumulated 3 or more Failed/Error transitions in a rolling 7-day window. WorkflowFailed (above) already pages on every individual failure at `warning`; this rule escalates to `critical` once failures are a pattern, not an isolated blip -- unmitigated, this repeats E1 (68 consecutive nightly failures, unnoticed for months, because nothing distinguished "failed once" from "failing every night").
+            incident: E1
+            summary: 3+ Argo Workflow failures in argo-workflows within 7 days -- chronic, not a one-off
+          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[7d]) >= 3
+          for: 5m
+          labels:
+            severity: critical
+        - alert: SiteSonarStale
+          annotations:
+            description: 'Same trigger-staleness shape as IcebergIngestStale (this group, above) but for the `ingest-sitesonar` CronWorkflow (chart/values.yaml''s `ingest.schedules.sitesonar`, daily 03:00 default): 24h cadence + 2h buffer. Detects "the schedule stopped firing at all" (controller down, CronWorkflow suspended/deleted/renamed); does NOT detect "triggered but failed", which WorkflowFailed already covers within 1h. `warning`, not `critical`: site-sonar populates auxiliary metadata (site_sonar table), not the core job_info/trace/ mon_jdls_parsed tables IcebergIngestStale protects at `critical`.'
+            incident: E4
+            summary: ingest-sitesonar has not even been triggered in 26h
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-sitesonar", exported_namespace="argo-workflows"}[26h]) == 0
+          for: 5m
+          labels:
+            severity: warning
+        - alert: IcebergMaintenanceStale
+          annotations:
+            description: argo_workflows_cronworkflows_triggered_total{name="ingest-maintenance"} counts TRIGGERS, not successes or real-vs-deferred runs (see this alert's own annotation above for the deferral blind spot this does NOT cover). increase()==0 over 8d (7d weekly cadence + 1d buffer) means the Sunday 04:00 schedule stopped firing entirely -- controller down, CronWorkflow suspended/ deleted/renamed, or an RBAC/namespace issue.
+            incident: E4-adjacent
+            summary: ingest-maintenance has not even been triggered in 8 days
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-maintenance", exported_namespace="argo-workflows"}[8d]) == 0
           for: 5m
           labels:
             severity: warning
