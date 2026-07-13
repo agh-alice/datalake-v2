@@ -17,6 +17,16 @@ namespaces:
 helloCron:
   enabled: false
 
+# echo-receiver: kind-only Slack-webhook stand-in the `slack-datalake`
+# Alertmanager receiver posts to (apps/infra/monitoring.yaml) -- proves the
+# whole route/group/inhibit/receiver pipeline end-to-end without a real
+# Slack workspace. Same values-gate shape as helloCron above: base default
+# FALSE (cyfronet inherits this -- gets a real Slack webhook via ESO
+# instead, G3), chart/values-kind.yaml overrides to TRUE. See
+# chart/templates/echo-receiver.yaml.
+echoReceiver:
+  enabled: false
+
 # Digest-pinned per no-mutable-tags convention. Verified via:
 #   docker pull busybox:1.36 && docker inspect busybox:1.36 \
 #     --format '{{index .RepoDigests 0}}'

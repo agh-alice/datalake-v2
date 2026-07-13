@@ -310,3 +310,118 @@ spec:
               the data-layer has nothing recent to show even if every
               upstream step reported success.
             incident: E4
+
+        # Plan 4 Task T2S1 -- the E1-streak escalation the P2 Task 5 review
+        # demanded (68 consecutive unnoticed nightly failures is the
+        # original E1 incident; WorkflowFailed above fires per-failure on a
+        # 1h window but never distinguishes "failed once, recovered" from
+        # "failing every single run for a week" -- this rule closes that
+        # gap with a 7d/>=3 streak threshold at `critical`, one severity
+        # step above WorkflowFailed's `warning`). Same metric, same
+        # exported_namespace label as WorkflowFailed (this group's header
+        # comment: argo_workflows_total_count{exported_namespace,phase} is
+        # the only per-namespace per-phase Failed/Error signal this
+        # controller version exposes -- re-verified live against this
+        # cluster's own Prometheus, 2026-07-13: `exported_namespace` values
+        # are exactly `argo-workflows`/`argocd`, matching the header
+        # comment's claim, not assumed from memory).
+        - alert: WorkflowChronicFailure
+          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[7d]) >= 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: 3+ Argo Workflow failures in argo-workflows within 7 days -- chronic, not a one-off
+            description: >-
+              argo_workflows_total_count{exported_namespace="argo-workflows",
+              phase=~"Failed|Error"} has accumulated 3 or more Failed/Error
+              transitions in a rolling 7-day window. WorkflowFailed (above)
+              already pages on every individual failure at `warning`; this
+              rule escalates to `critical` once failures are a pattern, not
+              an isolated blip -- unmitigated, this repeats E1 (68
+              consecutive nightly failures, unnoticed for months, because
+              nothing distinguished "failed once" from "failing every
+              night").
+            incident: E1
+
+        # Plan 4 Task T2S1 (P2-final follow-up): trigger-staleness for the
+        # two CronWorkflows datalake-alerts.yaml never covered --
+        # ingest-sitesonar (daily) and ingest-maintenance (weekly). Same
+        # shape and same verified-live metric as IcebergIngestStale above
+        # (argo_workflows_cronworkflows_triggered_total{name=...} is the
+        # ONLY per-CronWorkflow-name signal this controller version exposes
+        # -- this group's header comment), windowed to each schedule's own
+        # cadence + a buffer.
+        - alert: SiteSonarStale
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-sitesonar", exported_namespace="argo-workflows"}[26h]) == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: ingest-sitesonar has not even been triggered in 26h
+            description: >-
+              Same trigger-staleness shape as IcebergIngestStale (this
+              group, above) but for the `ingest-sitesonar` CronWorkflow
+              (chart/values.yaml's `ingest.schedules.sitesonar`, daily
+              03:00 default): 24h cadence + 2h buffer. Detects "the
+              schedule stopped firing at all" (controller down, CronWorkflow
+              suspended/deleted/renamed); does NOT detect "triggered but
+              failed", which WorkflowFailed already covers within 1h.
+              `warning`, not `critical`: site-sonar populates auxiliary
+              metadata (site_sonar table), not the core job_info/trace/
+              mon_jdls_parsed tables IcebergIngestStale protects at
+              `critical`.
+            incident: E4
+
+        # Plan 4 Task T2S1 (P2-final follow-up) + the P3-final ride-along
+        # (deferral-aware constraint): trigger-staleness for
+        # `ingest-maintenance` (weekly, chart/values.yaml's
+        # `ingest.schedules.maintenance`, Sunday 04:00 default) -- 7d
+        # cadence + a day of buffer.
+        #
+        # Deferral blind spot, documented honestly rather than papered over:
+        # `run-trino-maintenance` (ingest/src/alice_ingest/maintenance.py,
+        # "P3T3 review Important 1" section) DEFERS -- exits 0, a genuine
+        # Succeeded, NOT a failure -- whenever it finds `ingest-nightly`
+        # currently Running, to avoid an avoidable Iceberg-OCC commit-
+        # conflict cost. A CHRONIC deferral (e.g. nightly wedged Running
+        # forever, or the overlap-guard's Running check itself miscounting)
+        # would still TRIGGER on schedule every week -- so this alert's
+        # trigger-staleness signal stays silent -- while never doing any
+        # real maintenance work, and since a deferred run exits 0 the
+        # WorkflowFailed/WorkflowChronicFailure phase-based alerts above are
+        # blind to it too (Succeeded is Succeeded, whether real or
+        # deferred-no-op). Verified-first (this task): no Prometheus-
+        # queryable signal exists to distinguish "ran maintenance for real"
+        # from "deferred" without a new component -- maintenance.py exposes
+        # no metric of its own (same no-new-components decision as
+        # RetentionUnverifiedRows/IcebergSnapshotStale above), the only
+        # data-side trace of a real run is an Iceberg `replace`-operation
+        # snapshot (the same operation column commit 7d5e848's freshness-
+        # gate fix filters OUT of check-freshness) which lives in Trino/
+        # Iceberg metadata tables Prometheus has no exporter for anywhere in
+        # this stack (verified against this cluster's live target/series
+        # list: no Trino or Iceberg exporter is scraped). This alert
+        # therefore covers ONLY "the schedule stopped firing" -- a human
+        # who wants to confirm maintenance is actually EXECUTING (not
+        # chronically deferring) still has to read `run-trino-maintenance`
+        # pod logs for the `MAINTENANCE DEFERRED: ingest-nightly in flight`
+        # line by hand. This gap stays open (reviewer's Plan-4 note); a
+        # future fix would need a new component (e.g. a Pushgateway metric
+        # from maintenance.py itself), deliberately not added here.
+        - alert: IcebergMaintenanceStale
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-maintenance", exported_namespace="argo-workflows"}[8d]) == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: ingest-maintenance has not even been triggered in 8 days
+            description: >-
+              argo_workflows_cronworkflows_triggered_total{name="ingest-maintenance"}
+              counts TRIGGERS, not successes or real-vs-deferred runs (see
+              this alert's own annotation above for the deferral blind
+              spot this does NOT cover). increase()==0 over 8d (7d weekly
+              cadence + 1d buffer) means the Sunday 04:00 schedule stopped
+              firing entirely -- controller down, CronWorkflow suspended/
+              deleted/renamed, or an RBAC/namespace issue.
+            incident: E4-adjacent

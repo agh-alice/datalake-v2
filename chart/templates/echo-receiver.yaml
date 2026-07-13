@@ -1,0 +1,76 @@
+# Kind-only Slack-webhook stand-in (Plan 4 T2S1 prework): apps/infra/
+# monitoring.yaml's `slack-datalake` Alertmanager receiver posts to this
+# Service's URL on kind (Secret monitoring/alertmanager-slack-webhook,
+# harness-provisioned by hack/kind-up.sh) instead of a real Slack webhook,
+# so the whole route/group/inhibit/receiver pipeline is END-TO-END
+# testable without a real Slack workspace. Same values-gate shape as
+# chart/templates/hello-cronworkflow.yaml's `helloCron.enabled` --
+# kind-only capability, base default false so cyfronet never runs it (G3,
+# deliverables/plans/2026-07-13-datalake-v2-migration-plan.md: cyfronet
+# gets a real Slack webhook via ESO instead, see
+# docs/runbooks/bootstrap-cyfronet.md).
+#
+# Reuses `.Values.images.ingest` (already digest-pinned, ships Python 3)
+# rather than adding a new pinned image for one throwaway container --
+# same reasoning hack/kind-verify.sh's trino-query-probe/iceberg-contents-
+# probe already use for reusing that image instead of curlimages/curl.
+# stdlib http.server (no new dependency) logs every POST body verbatim to
+# stdout so `kubectl logs` is the evidence trail kind-verify's synthetic-
+# alert hard gate (and a human) reads.
+{{- if .Values.echoReceiver.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-receiver
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: echo-receiver}
+  template:
+    metadata:
+      labels: {app: echo-receiver}
+    spec:
+      containers:
+        - name: echo-receiver
+          image: {{ .Values.images.ingest }}
+          command: ["python3", "-c"]
+          args:
+            - |
+              import http.server
+
+              class Handler(http.server.BaseHTTPRequestHandler):
+                  def do_POST(self):
+                      length = int(self.headers.get("Content-Length", 0) or 0)
+                      body = self.rfile.read(length)
+                      print("ECHO-RECEIVER POST path=" + self.path, flush=True)
+                      print(body.decode("utf-8", "replace"), flush=True)
+                      self.send_response(200)
+                      self.send_header("Content-Length", "0")
+                      self.end_headers()
+
+                  def log_message(self, fmt, *args):
+                      pass
+
+              http.server.HTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            tcpSocket: {port: 8080}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-receiver
+  namespace: monitoring
+spec:
+  selector: {app: echo-receiver}
+  ports:
+    - port: 8080
+      targetPort: 8080
+{{- end }}

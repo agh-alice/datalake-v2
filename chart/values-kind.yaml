@@ -6,6 +6,12 @@
 helloCron:
   enabled: true
 
+# echo-receiver is the kind-only Slack-webhook stand-in (chart/values.yaml's
+# comment) -- enabled here, base default stays FALSE so cyfronet never runs
+# it.
+echoReceiver:
+  enabled: true
+
 landingDb:
   instances: 1
   storageSize: 2Gi
