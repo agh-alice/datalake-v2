@@ -121,7 +121,7 @@ spec:
           command:
             - python3
             - -c
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
           name: echo-receiver
           ports:
             - containerPort: 8080
@@ -230,7 +230,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
         name: run-nightly
       - container:
           args:
@@ -238,7 +238,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
         name: run-retention
       - container:
           args:
@@ -246,7 +246,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
         name: check-freshness
     ttlStrategy:
       secondsAfterCompletion: 86400
@@ -271,7 +271,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
         name: main
     ttlStrategy:
       secondsAfterCompletion: 86400
@@ -305,7 +305,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
         name: run-maintenance
       - container:
           args:
@@ -313,7 +313,7 @@ spec:
           envFrom:
             - secretRef:
                 name: ingest-env
-          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:8655c77bc10f47d8cbbf382454e3881ea055a48aab6e544aca8ebe53a6e7ecf6
+          image: ghcr.io/agh-alice/datalake-v2-ingest@sha256:431350844f0a8ccc85f65e79eaaab26b0f8c46cfed8a6514862001a78b21c61f
         name: run-trino-maintenance
     ttlStrategy:
       secondsAfterCompletion: 86400

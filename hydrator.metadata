@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "f03be47f3e8dc26c2855fdd4ea69f115202b1504",
+  "drySha": "644e6ea8df7793547f0bb8d55e6ffcf69fa533e3",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T14:47:14Z",
-  "subject": "chore: pin ingest image digest for the dress-rehearsal fix wave",
-  "body": "Digest 8655c77b resolved from GHCR for commit 4677c62 (escaped-JDL decode\n+ subtractive drift detection) and verified via buildx imagetools inspect.\n"
+  "date": "2026-07-13T15:19:49Z",
+  "subject": "chore: pin ingest image digest for the JDL value-canonicalization fix",
+  "body": "Digest 43135084 resolved from GHCR for commit cebae62 and verified via\nbuildx imagetools inspect.\n"
 }
