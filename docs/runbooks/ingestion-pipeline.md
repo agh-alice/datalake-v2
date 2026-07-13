@@ -28,7 +28,9 @@ flowchart LR
         RN["run-nightly\n(job_info, trace, mon_jdls)"]
         RS[run-sitesonar]
         RR[run-retention]
+        CF[check-freshness]
         RM[run-maintenance]
+        RTM[run-trino-maintenance]
     end
     subgraph lakekeeper [lakekeeper namespace]
         LK[Lakekeeper\nIceberg REST catalog]
@@ -36,18 +38,27 @@ flowchart LR
     subgraph minio [minio namespace, kind only]
         S3[(MinIO\nwarehouse/lakekeeper-warehouse/alice/...)]
     end
+    subgraph trino [trino namespace]
+        TR[Trino\nlake + landing catalogs]
+        CV[lake.contract.*\nviews -- apply-views, manual/one-off]
+    end
 
     PG -->|connectorx / sqlalchemy\nvia dlt sql_database| RN
+    PG -->|read-only, trino_ro role| TR
     SS -->|HTTP, dlt resource| RS
-    CW1 --> RN --> RR
+    CW1 --> RN --> RR --> CF
     CW2 --> RS
-    CW3 --> RM
+    CW3 --> RM --> RTM
     RN -->|dlt destination=filesystem\ntable_format=iceberg| LK
     RS --> LK
     RM -->|expire_snapshots| LK
     RR -->|pyiceberg REST scan\npresence check| LK
+    RTM -->|OPTIMIZE, expire_snapshots,\nremove_orphan_files| LK
+    CF -->|max committed_at\nper $snapshots| TR
     LK -->|storage-profile| S3
     RN -.->|writes data+metadata\nAND _dlt_* bookkeeping| S3
+    TR -->|iceberg REST + vended creds| LK
+    LK -.->|CREATE OR REPLACE VIEW| CV
 ```
 
 Every write path (`run-nightly`, `run-sitesonar`) goes through dlt's
@@ -57,9 +68,35 @@ dlt talks to Lakekeeper's REST catalog for table create/commit, and writes
 Parquet data files + Iceberg metadata directly to the S3-compatible bucket
 Lakekeeper's storage-profile points at (MinIO on kind, Cyfronet S3 in
 production -- no MinIO namespace exists on cyfronet, see
-`docs/runbooks/bootstrap-cyfronet.md`). `run-retention` and `run-maintenance`
-read the catalog directly via `pyiceberg` (no dlt involved on those two
-paths).
+`docs/runbooks/bootstrap-cyfronet.md`). `run-retention`, `run-maintenance`,
+and `check-freshness` read the catalog directly via `pyiceberg`/Trino (no
+dlt involved on those paths).
+
+**The query layer (Plan 3): Trino, contract views, extraction.** Trino
+(`apps/infra/trino.yaml`, chart 1.40.0/appVersion 476 -- kind-only pin, see
+that file's comment) serves two catalogs: `lake` (Iceberg REST -> Lakekeeper,
+vended S3 credentials, the same tables this pipeline writes) and `landing`
+(PostgreSQL federation -> `mon-data`, read-only role `trino_ro`, provisioned
+by `hack/kind-up.sh` -- the dual-run comparison surface Plan 4 needs). A
+dedicated schema, `lake.contract`, holds views restoring the ML consumer's
+original dtypes-contract column spellings (`LPMPassName`, `TTL`, `Packages`,
+...) over the dlt-normalized `alice.*` tables (`jdl__lpm_pass_name`,
+`jdl__ttl`, `jdl__packages`, ...) -- built by `ingest/src/alice_ingest/
+views.py`, applied via `alice-ingest apply-views` (idempotent `CREATE OR
+REPLACE VIEW`; `--strict` exits 2 on drift between the static
+`contract_columns.py` mapping and live `jdl__*` columns -- Plan 4's cutover
+gate). Unlike `run-nightly`/`run-sitesonar`/`run-maintenance`,
+**`apply-views` is NOT wired into any CronWorkflow today** -- it is a manual,
+one-off step (`hack/run-ingest-once.sh` runs it after `run-nightly` on
+every kind clean-room, since the views live in Lakekeeper's own Postgres and
+do not survive a `kind-down`). Weekly maintenance's Trino half
+(`run-trino-maintenance`, `TRINO_MAINTENANCE_RETENTION_THRESHOLD`) is the
+load-bearing physical file GC pyiceberg 0.11.1 cannot do on its own (section
+2's env-var table; `maintenance.py`'s module docstring has the full
+verification trail). Nightly's `check-freshness` step is the data-layer half
+of design D11 staleness (section 2, `FRESHNESS_MAX_AGE_HOURS`). For
+consumer-side extraction (the DuckDB replacement for the old Dremio Flight
+script), see `docs/runbooks/ml-extraction.md`.
 
 ## 2. Env-var contract
 
@@ -87,6 +124,7 @@ Optional, with defaults:
 | `MAINTENANCE_OLDER_THAN_DAYS` | `7` | `maintenance.py` (snapshot-expiry cutoff, distinct from `RETENTION_DAYS`) |
 | `TRINO_MAINTENANCE_RETENTION_THRESHOLD` | `7d` | `maintenance.py`'s `run_trino()` (Trino `expire_snapshots`/`remove_orphan_files` retention arg -- `7d` sits exactly at Trino's connector-enforced minimum, see `maintenance.py`'s module docstring, "Retention floor") |
 | `MAINTENANCE_FORCE` | unset | `maintenance.py`'s `run_trino()` -- set to `1` to skip the P3T3 review Important 1 nightly-vs-maintenance overlap guard (`check_nightly_overlap_guard()`) and proceed with Trino maintenance regardless of whether `ingest-nightly` is currently Running. An operator's explicit "I know what I'm doing" override for a manual trigger (e.g. after confirming nightly is idle, or accepting the Iceberg-OCC-mediated conflict risk for a one-off run); the guard itself already fails open (proceeds with a warning) if the Kubernetes API is unreachable, so this var is for a KNOWN-running nightly, not a broken guard. |
+| `FRESHNESS_MAX_AGE_HOURS` | `26` | `maintenance.py`'s `run_freshness_check()` (`check-freshness`, `ingest-nightly`'s third DAG step, after `run-retention` -- design D11 completion, "Data-layer freshness gate" in `maintenance.py`'s module docstring). Per-table `max(committed_at)` from `lake.alice."<table>$snapshots"` (job_info, trace, mon_jdls_parsed) is compared against `now() - FRESHNESS_MAX_AGE_HOURS`; any table older than that (or missing entirely) fails the step non-zero, which fails the owning Workflow and surfaces through the existing `WorkflowFailed` alert. Default `26` = the 24h nightly cadence plus a 2h buffer, matching `IcebergIngestStale`'s window in `chart/templates/datalake-alerts.yaml`. |
 
 Backfill overrides, all optional (Plan 2 Task 6; see `docs/runbooks/
 backfill.md` for worked examples -- listed here only for the contract):
@@ -142,15 +180,42 @@ Commands:
   file-level high-water mark to skip already-processed archives).
 - `run-retention` -- landing-row retention against `RETENTION_DAYS`,
   gated on Iceberg-presence verification (section 5 below).
+- `check-freshness` -- data-layer staleness gate (design D11 completion,
+  Plan 3 Task 3): fails (exit 1) if any of `job_info`/`trace`/
+  `mon_jdls_parsed`'s latest Iceberg snapshot (`max(committed_at)` from
+  Trino's `"<table>$snapshots"` metadata table) is missing or older than
+  `FRESHNESS_MAX_AGE_HOURS` (section 2). Requires `TRINO_URI`.
 - `run-maintenance` -- weekly Iceberg snapshot expiry
   (`table.maintenance.expire_snapshots().older_than(...)` for every table
   currently registered under `alice`).
+- `run-trino-maintenance` -- weekly Trino physical maintenance (Plan 3
+  Task 3): `ALTER TABLE ... EXECUTE optimize` / `expire_snapshots` /
+  `remove_orphan_files` per `alice.*` table -- the physical file-level GC
+  pyiceberg 0.11.1's `run-maintenance` cannot do on its own (`maintenance.py`'s
+  module docstring). Defers (exit 0, no-op) if `ingest-nightly` is currently
+  Running, unless `MAINTENANCE_FORCE=1` (section 2's env-var table).
+  Requires `TRINO_URI`.
+- `apply-views` `[--strict]` -- idempotent `CREATE OR REPLACE VIEW` DDL
+  restoring the ML consumer's dtypes-contract column spellings over the
+  dlt-normalized `alice.*` tables, into schema `lake.contract` (Plan 3 Task
+  2; `views.py`'s module docstring has the full view-storage-path evidence).
+  `--strict` exits 2 instead of only warning when live `jdl__*` columns with
+  no contract-mapping counterpart are found (drift detection -- Plan 4's
+  cutover gate). **Not on any schedule** -- see the query-layer paragraph in
+  section 1 for why this command must be re-run manually after any full
+  cluster reset. Requires `TRINO_URI`.
 
 The scheduled `CronWorkflow`s (`chart/templates/ingest-cronworkflows.yaml`)
-run these on `.Values.ingest.schedules.{nightly,sitesonar,maintenance}`
-(kind/default: `02:00`, `03:00`, Sunday `04:00`); `run-retention` runs as
-the second DAG step of `ingest-nightly`, gated on `run-nightly` succeeding
-first (hard dependency, not a race).
+run `run-nightly`/`run-sitesonar`/`run-maintenance` on
+`.Values.ingest.schedules.{nightly,sitesonar,maintenance}` (kind/default:
+`02:00`, `03:00`, Sunday `04:00`). `ingest-nightly` is a 3-step DAG:
+`run-nightly` -> `run-retention` -> `check-freshness`, each gated on the
+previous step's success (hard dependencies, not a race).
+`ingest-maintenance` is a 2-step DAG: `run-maintenance` (pyiceberg) ->
+`run-trino-maintenance` (Trino physical GC), same hard-dependency shape.
+`apply-views` is invoked manually only (`hack/run-ingest-once.sh` on kind;
+an equivalent one-shot Workflow on cyfronet -- see section 3's example
+pattern above).
 
 ## 4. Watermark state location
 

@@ -211,6 +211,16 @@ workflow -l workflows.argoproj.io/cron-workflow=ingest-nightly` recipe
 already uses, so this guard queries exactly what a human operator would
 check by hand.
 
+P3T3 residual (docs pass, Plan 3 Task 5): the label filter means this guard
+only sees Workflows the `ingest-nightly` CronWorkflow itself scheduled --
+a manually `kubectl create`d one-shot Workflow running `run-nightly` (e.g.
+`hack/run-ingest-once.sh`) carries no `workflows.argoproj.io/cron-workflow`
+label and is therefore invisible to `is_cron_workflow_running()`; a manual
+maintenance trigger overlapping a manual nightly trigger will NOT be
+deferred by this guard. Accepted: a human running both manually is already
+watching what they're doing and owns that window; Iceberg OCC is still the
+actual safety layer regardless.
+
 Data-layer freshness gate (design D11 completion)
 --------------------------------------------------------------------------
 The nightly workflow's final `check-freshness` step: `max(committed_at)`

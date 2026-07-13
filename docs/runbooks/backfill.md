@@ -194,12 +194,12 @@ starting the dual-run window:
   maintenance running on its normal schedule while simply expiring less
   aggressively -- preferable to a full pause if the migration window is
   long or its exact end date is uncertain. Note this env var only
-  overrides the PYICEBERG-side `MAINTENANCE_OLDER_THAN_DAYS` cutoff and the
-  Trino-side `TRINO_MAINTENANCE_RETENTION_THRESHOLD` argument passed to
-  `expire_snapshots`/`remove_orphan_files` -- it does not touch
-  `MAINTENANCE_OLDER_THAN_DAYS` itself, which has its own separate env var
-  and defaults to the same `7` if not also raised. Raise both together if
-  the pyiceberg-side expiry pass also needs to preserve the longer window.
+  overrides the TRINO-side `TRINO_MAINTENANCE_RETENTION_THRESHOLD` argument
+  passed to `expire_snapshots`/`remove_orphan_files` -- it does not touch
+  the PYICEBERG-side `MAINTENANCE_OLDER_THAN_DAYS` cutoff, which has its own
+  separate env var and defaults to the same `7` if not also raised. Raise
+  both together if the pyiceberg-side expiry pass also needs to preserve
+  the longer window.
 
 **Going the other direction never applies here, but is worth knowing
 about.** `TRINO_MAINTENANCE_RETENTION_THRESHOLD` can only be raised freely
