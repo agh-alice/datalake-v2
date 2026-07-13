@@ -26,19 +26,20 @@ helloCron:
 # is public, digest published by .github/workflows/ingest-image.yaml's job
 # summary on every push to main touching ingest/**. Manual pin (not
 # auto-committed) is deliberate -- the chart change is the deploy and stays
-# reviewable in the rendered-branch diff. Pinned from CI run 29213645823
-# (commit 24af764, ingest-image workflow, Plan 3 Task 2 review-fix wave:
-# apply-views drift detection + --strict gate + contract_columns.py
-# regeneration procedure -- see views.py's module docstring, "Drift
-# detection"; the prior pin [sha256:131fc3e9...] predates it); verified
-# resolvable via the GHCR registry API (`GET /v2/agh-alice/datalake-v2-
-# ingest/manifests/<digest>` with an anonymous pull token, HTTP 200) --
-# same index-manifest structure as the previous pin. Consumed by
-# chart/templates/ingest-cronworkflows.yaml (Task 4 nightly/sitesonar,
-# Task 5 maintenance).
+# reviewable in the rendered-branch diff. Pinned from CI run 29218647381
+# (commit 49c3fb7, ingest-image workflow, Plan 3 Task 5 docs wave:
+# maintenance.py's overlap-guard docstring note -- the prior pin
+# [sha256:4587fc3e...] predates it); verified resolvable via the GHCR
+# registry API (`GET /v2/agh-alice/datalake-v2-ingest/manifests/<digest>`
+# with an anonymous pull token + an explicit multi-format Accept header,
+# HTTP 200 -- a bare request with no Accept header returned a misleading
+# 404 here) -- same index-manifest structure as the previous pin. Consumed
+# by chart/templates/ingest-cronworkflows.yaml (Task 4 nightly/sitesonar,
+# Task 5 maintenance) and hack/run-ingest-once.sh/hack/kind-verify.sh's
+# probes (via `yq -r '.images.ingest' chart/values.yaml`).
 images:
   busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
-  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:4587fc3e9ff3ab350da977abd83a34998fa8de360a063cfeffef51a8926f4282"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:a1871900d666b2aed2e1c62659489a8448b69bd54c28e13e279f7ec3144eac64"
 
 # enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
 # chart/templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
