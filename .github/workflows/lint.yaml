@@ -12,3 +12,19 @@ jobs:
       - run: |
           curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz && sudo mv kubeconform /usr/local/bin/
       - run: make lint
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ubuntu-latest ships shellcheck preinstalled; no separate setup step.
+      # `-x` follows `# shellcheck source=...` directives across files (e.g.
+      # hack/kind-up.sh sourcing hack/lib/warehouse-config.sh); `-P hack -P
+      # hack/lib` gives it the search paths those relative source directives
+      # need to actually resolve when shellcheck is invoked from repo root
+      # (verified locally: `-x` alone, without `-P`, still reports a
+      # spurious SC1091 "does not exist" for the same source line despite
+      # the directive being correct -- a path-resolution quirk of `source=`
+      # directives being resolved relative to the invocation's search-path
+      # set, not purely the sourcing script's own directory, when multiple
+      # files are checked in one invocation).
+      - run: shellcheck -x -P hack -P hack/lib hack/*.sh hack/lib/*.sh

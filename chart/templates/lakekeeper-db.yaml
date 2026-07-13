@@ -5,7 +5,14 @@ metadata:
   namespace: lakekeeper
 spec:
   instances: {{ .Values.lakekeeperDb.instances }}
-  imageName: ghcr.io/cloudnative-pg/postgresql:16.6
+  # Digest-pinned per no-mutable-tags convention (Plan-1 final-review N2).
+  # Verified via `docker buildx imagetools inspect
+  # ghcr.io/cloudnative-pg/postgresql:16.6` (Digest: field -- the index-
+  # manifest digest, same multi-arch-index pinning shape as chart/values.yaml's
+  # ingest image), cross-checked against the GHCR registry API directly
+  # (`GET /v2/cloudnative-pg/postgresql/manifests/16.6` with an anonymous
+  # pull token -> `docker-content-digest` response header) -- both agree.
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6@sha256:53be6d727c7b3cf0df2b147f7ce7cdd31d37fd285314294871a4ccc3837b6872
   storage:
     size: {{ .Values.lakekeeperDb.storageSize }}
   bootstrap:

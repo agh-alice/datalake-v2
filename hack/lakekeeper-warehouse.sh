@@ -107,7 +107,7 @@ PODYAML
 # attach, so the attach-race that pattern guards against doesn't apply here,
 # but polling pod phase (rather than tailing) keeps the same reliable shape.
 phase=""
-for i in $(seq 1 70); do
+for _ in $(seq 1 70); do
   phase=$(kubectl -n minio get pod lakekeeper-warehouse-bootstrap -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
   { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
   sleep 5

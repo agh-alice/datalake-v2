@@ -149,7 +149,7 @@ spec:
           print("reset-pipeline: OK")
 PODYAML
 phase=""
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   phase=$(kubectl -n argo-workflows get pod reset-pipeline -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
   { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
   sleep 5
