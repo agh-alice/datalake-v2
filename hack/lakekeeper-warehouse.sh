@@ -48,17 +48,26 @@ spec:
           AUTH='Authorization: Bearer dummy'
           # Guarded wait (brief requirement): right after `kubectl apply`,
           # ArgoCD sync + pod startup latency means the Service may not answer
-          # yet. Poll up to 5 minutes before giving up.
+          # yet. Poll up to 10 minutes before giving up -- was 5, raised in
+          # the Plan 3 Task 5 clean-room: on a fully cold cluster (kind-down
+          # then kind-up, every image a fresh pull) lakekeeper took ~6 min to
+          # first answer (CNPG operator pull, then postgres pull + the
+          # lakekeeper-db Cluster bootstrap + the db-migration Job, then the
+          # lakekeeper pull -- strictly sequential), and this poll gave up at
+          # 5m. Same cold-pull failure class the Task 8 clean-room hit on the
+          # argocd helm install, fixed there the same way (5m -> 10m). The
+          # kind-up rerun is idempotent either way; this makes the FIRST
+          # attempt succeed.
           i=0
           CODE=000
-          while [ "$i" -lt 60 ]; do
+          while [ "$i" -lt 120 ]; do
             CODE=$(curl -s -o /tmp/info.json -w '%{http_code}' "$LK/management/v1/info" || echo 000)
             [ "$CODE" = "200" ] && break
             i=$((i+1))
             sleep 5
           done
           if [ "$CODE" != "200" ]; then
-            echo "FAIL: lakekeeper /management/v1/info unreachable after 5m (last code: $CODE)"
+            echo "FAIL: lakekeeper /management/v1/info unreachable after 10m (last code: $CODE)"
             exit 1
           fi
           # Bootstrap is mandatory before warehouse creation and is a one-time,
@@ -107,7 +116,11 @@ PODYAML
 # attach, so the attach-race that pattern guards against doesn't apply here,
 # but polling pod phase (rather than tailing) keeps the same reliable shape.
 phase=""
-for _ in $(seq 1 70); do
+# 140 x 5s (~11.7m): must outlast the pod's OWN in-container wait, which the
+# Task 5 clean-room raised to 10m (see the poll comment inside PODYAML above)
+# -- a host-side poll shorter than the pod's budget would declare FAIL while
+# the pod is still legitimately waiting for lakekeeper to answer.
+for _ in $(seq 1 140); do
   phase=$(kubectl -n minio get pod lakekeeper-warehouse-bootstrap -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
   { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
   sleep 5
