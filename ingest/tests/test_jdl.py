@@ -235,7 +235,8 @@ class TestParseJdlEscapedProductionEncoding:
         result = parse_jdl(record)
 
         assert result["jdl_parse_ok"] is True
-        assert result["jdl"] == jdl
+        # Values arrive canonicalized to strings (TestParseJdlValueCanonicalization).
+        assert result["jdl"] == {"User": "aliprod", "TTL": "72000", "LPMPassName": "apass4"}
         assert "full_jdl" not in result
         assert "full_jdl_raw" not in result
 
@@ -297,3 +298,102 @@ class TestParseJdlEscapedProductionEncoding:
 
         assert result["jdl_parse_ok"] is True
         assert result["jdl"]["Comment"] == "literal backslash-n here: \\n stays two chars"
+
+
+class TestParseJdlValueCanonicalization:
+    """Real production JDLs mix JSON types for the SAME field across rows
+    (dress-rehearsal run 2: `WorkDirectorySize` is `["50000MB"]` in most
+    rows and a plain scalar in others -- dlt then demands a `__v_text`
+    variant column, which the deliberate `data_type: freeze` schema
+    contract rejects TERMINALLY, research/2026-07-13_production-data-
+    dress-rehearsal.md). The fix is canonicalization at parse time: every
+    top-level JDL value is served as a string -- str values pass through
+    unchanged, None stays None (SQL NULL), and everything else (numbers,
+    bools, lists, dicts) becomes its compact JSON text. Every `jdl__*`
+    column is therefore varchar BY CONSTRUCTION: variant columns become
+    impossible, the freeze contract stays as the guardrail it was meant to
+    be, and the evolved column set depends only on the field-NAME
+    vocabulary, never on which row's type showed up first (deterministic
+    schema across backfill orderings -- the Plan-4 cutover property). The
+    ML consumer's dtypes contract types every field as object/float64 and
+    its data_loader owns the casting (research/2026-07-12_ml-consumer-
+    data-contract.md), so string serving is contract-compatible."""
+
+    def test_string_values_pass_through_unchanged(self):
+        record = {"job_id": 1, "full_jdl": '{"User": "aliprod", "MemorySize": "64GB"}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl"] == {"User": "aliprod", "MemorySize": "64GB"}
+
+    def test_numeric_and_bool_values_become_json_text(self):
+        record = {"job_id": 2, "full_jdl": '{"TTL": 72000, "Price": 2.0, "DirectAccess": true}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["TTL"] == "72000"
+        assert result["jdl"]["Price"] == "2.0"
+        assert result["jdl"]["DirectAccess"] == "true"
+
+    def test_list_values_become_compact_json_text(self):
+        record = {
+            "job_id": 3,
+            "full_jdl": '{"WorkDirectorySize": ["50000MB"], "Packages": ["A::v1", "B::v2"]}',
+        }
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["WorkDirectorySize"] == '["50000MB"]'
+        assert result["jdl"]["Packages"] == '["A::v1","B::v2"]'
+
+    def test_dict_values_become_compact_json_text(self):
+        record = {"job_id": 4, "full_jdl": '{"LPMMetaData": {"Comment": "pp 13.6", "Year": 2026}}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["LPMMetaData"] == '{"Comment":"pp 13.6","Year":2026}'
+
+    def test_null_values_stay_none(self):
+        record = {"job_id": 5, "full_jdl": '{"PWG": null, "User": "aliprod"}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["PWG"] is None
+        assert result["jdl"]["User"] == "aliprod"
+
+    def test_mixed_type_field_across_rows_yields_one_string_type(self):
+        # THE run-2 failure case: same field, list in one row, scalar in the
+        # next -- both must land as strings so dlt never needs a variant.
+        r1 = parse_jdl({"job_id": 6, "full_jdl": '{"WorkDirectorySize": ["50000MB"]}'})
+        r2 = parse_jdl({"job_id": 7, "full_jdl": '{"WorkDirectorySize": 5000}'})
+
+        assert isinstance(r1["jdl"]["WorkDirectorySize"], str)
+        assert isinstance(r2["jdl"]["WorkDirectorySize"], str)
+
+    def test_lpm_merge_happens_before_canonicalization(self):
+        # The merged canonical value must be canonicalized like any other
+        # (a numeric LPMPASSNAME still ends up a string under the canonical
+        # key).
+        record = {"job_id": 8, "full_jdl": '{"LPMPASSNAME": 4}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["LPMPassName"] == "4"
+        assert "LPMPASSNAME" not in result["jdl"]
+
+    def test_canonicalization_applies_to_escaped_encoding_too(self):
+        raw = json.dumps(json.dumps({"TTL": 72000, "JobTag": ["comment:x"]}, indent=2))[1:-1]
+        record = {"job_id": 9, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is True
+        assert result["jdl"]["TTL"] == "72000"
+        assert result["jdl"]["JobTag"] == '["comment:x"]'
+
+    def test_non_ascii_content_stays_readable_not_escaped(self):
+        record = {"job_id": 10, "full_jdl": '{"Comment": ["süß"]}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl"]["Comment"] == '["süß"]'

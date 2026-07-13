@@ -69,6 +69,38 @@ def _decode_jdl_object(raw: str) -> dict:
     return parsed
 
 
+def _canonicalize_values(jdl: dict) -> dict:
+    """Serve every top-level JDL value as a string (or None), in place.
+
+    Real production JDLs mix JSON types for the SAME field across rows
+    (dress-rehearsal run 2: `WorkDirectorySize` = `["50000MB"]` in most
+    rows, a plain scalar in others -- research/2026-07-13_production-data-
+    dress-rehearsal.md). Left alone, dlt answers mixed types with variant
+    columns (`jdl__work_directory_size__v_text`), which pipeline.py's
+    deliberate `data_type: freeze` schema contract rejects TERMINALLY --
+    and relaxing the freeze would make the evolved column set depend on
+    which row's type happened to arrive first (non-deterministic schema
+    across backfill orderings; a per-window trap at Plan-4 cutover).
+
+    Canonical rule instead: `str` passes through unchanged, `None` stays
+    None (SQL NULL), everything else (numbers, bools, lists, dicts)
+    becomes its compact JSON text (`json.dumps`, no spaces,
+    ensure_ascii=False). Every `jdl__*` column is therefore varchar BY
+    CONSTRUCTION -- variants impossible, freeze contract intact as the
+    guardrail it was meant to be, lossless (the JSON text preserves the
+    exact structure). The ML consumer's dtypes contract types every JDL
+    field as object/float64 and its `data_loader` owns all casting
+    (research/2026-07-12_ml-consumer-data-contract.md), so string serving
+    is contract-compatible; gen-1 served Spark PERMISSIVE-mode inference
+    here, which silently NULLed type mismatches -- this rule preserves
+    the value instead."""
+    for key, value in jdl.items():
+        if value is None or isinstance(value, str):
+            continue
+        jdl[key] = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    return jdl
+
+
 def parse_jdl(record: dict) -> dict:
     """Parse the JDL JSON text column into a dict for dlt's normalizer.
 
@@ -77,7 +109,9 @@ def parse_jdl(record: dict) -> dict:
     Unparseable JDLs are preserved raw + flagged, never dropped. Handles
     both plain-JSON and production's escaped-JSON encodings (see
     `_decode_jdl_object`); on failure, `full_jdl_raw` always preserves the
-    ORIGINAL landing value, never a half-decoded intermediate.
+    ORIGINAL landing value, never a half-decoded intermediate. Parsed
+    values are canonicalized to strings (see `_canonicalize_values`) after
+    the LPM-casing merge.
     """
     raw = record.pop("full_jdl", None)
     if raw is None:
@@ -86,7 +120,7 @@ def parse_jdl(record: dict) -> dict:
     try:
         parsed = _decode_jdl_object(raw)
         _merge_lpm_casing(parsed)
-        record["jdl"] = parsed
+        record["jdl"] = _canonicalize_values(parsed)
         record["jdl_parse_ok"] = True
     except (ValueError, json.JSONDecodeError):
         record["full_jdl_raw"] = raw
