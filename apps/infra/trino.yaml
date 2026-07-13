@@ -69,6 +69,31 @@ spec:
       # so the nulls reach Helm's coalesce byte-identical,
       # deterministically, and SHOW CATALOGS stays lake/landing/system.
       values: |
+        # Digest-pinned per the E2 founding lesson (design doc E2: a
+        # mutable-tag image + broken git-sync caused gen-1's silent
+        # deployment drift -- "not the repo's code") -- final review R3.
+        # `image.digest` (chart 1.40.0's values.yaml, confirmed via `helm
+        # show values trino/trino --version 1.40.0`) overrides `image.tag`
+        # and pins the SAME index-manifest-digest shape already used for
+        # chart/values.yaml's ingest/busybox images and
+        # chart/templates/{landing,lakekeeper}-db.yaml's CNPG postgres
+        # image. Resolved two ways, both agreeing (2026-07-13): `docker
+        # buildx imagetools inspect trinodb/trino:476` (`Digest:` field) and
+        # the Docker Hub registry v2 API directly (anonymous pull token,
+        # `GET /v2/trinodb/trino/manifests/476` with an
+        # `application/vnd.docker.distribution.manifest.list.v2+json`
+        # Accept header -> `docker-content-digest` response header). This is
+        # the multi-arch manifest-LIST digest for tag 476 (the same pin the
+        # chart's `image.tag: "476"` default would otherwise resolve to
+        # mutably), not a single-platform child digest -- a client pulling
+        # `trinodb/trino@sha256:...` still selects the right platform
+        # manifest from the list, same as pulling by tag. Re-resolve this
+        # digest at cyfronet re-pin (kind's ubi9/x86-64-v3 constraint, see
+        # the chart/appVersion comment above, is KIND-ONLY -- cyfronet is
+        # expected to move off 476 entirely, per that comment's own
+        # instruction to re-evaluate the newest chart there).
+        image:
+          digest: "sha256:00125e40d063bc4816d165482f6044872b18b56026fb959d3b28ce1f96ffbbee"
         # Coordinator-only on kind (resource-frugality constraint, JVM heap
         # <= 2G). `server.workers: 0` is not merely "zero replicas" -- the
         # chart's deployment-worker.yaml/configmap-worker.yaml templates are
