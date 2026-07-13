@@ -126,6 +126,43 @@ this script could translate the view's stored SQL definition itself.
 Until then, `docs/runbooks/ml-extraction.md` documents this column-naming
 gap explicitly so consumers aren't surprised by `jdl__*` spellings.
 
+fallback_reason disambiguation (P3T4 review Important 1)
+--------------------------------------------------------------------------
+DuckDB raises the exact same `CatalogException: Table with name <table>
+does not exist!` whether the contract view genuinely exists server-side
+(today's true case, above) OR the view was never created in the first
+place (e.g. `alice-ingest apply-views` was never run after `kind-up` --
+an ops mistake, not a client limitation). A `fallback_reason` that always
+claims the former would misattribute the latter. `resolve_source()`
+disambiguates by issuing a direct REST call against the Iceberg REST
+catalog itself (`rest_catalog_prefix()` + `check_contract_view_exists()`,
+stdlib `urllib` only -- no new dependency) whenever the contract read
+fails and a usable `alice` fallback exists:
+
+- `GET <catalog-uri>/v1/config?warehouse=<warehouse>` first, to resolve
+  Lakekeeper's real REST-catalog prefix -- mirroring the discovery DuckDB's
+  own Iceberg REST-catalog client already performs at ATTACH time. This is
+  NOT the `--warehouse` name itself: verified live 2026-07-13 against this
+  repo's kind cluster, `/v1/config?warehouse=default` returned
+  `overrides.prefix` as a warehouse UUID (`2b6351e0-7e14-...`), distinct
+  from the literal `"default"` ATTACH's own `warehouse` argument uses.
+- `GET <catalog-uri>/v1/<prefix>/namespaces/contract/views`, then checks
+  whether the failing table is in the returned `identifiers` list.
+  Verified live 2026-07-13: for this cluster's `contract` namespace, the
+  three views (`job_info`, `trace`, `mon_jdls_parsed`) ARE listed -- i.e.
+  today's real cause genuinely is the duckdb-iceberg client limitation
+  described above, not a missing `apply-views` run.
+
+Three `fallback_reason` outcomes result: the view is listed (today's true
+case -- a duckdb-iceberg client limitation), the view is absent or the
+namespace itself 404s (an ops mistake -- `apply-views` likely was not run;
+see `docs/runbooks/ingestion-pipeline.md`), or the REST check itself fails
+(network/auth/malformed-response -- cause genuinely undetermined, said so
+plainly rather than guessing). If the `alice` table is ALSO unreadable,
+`resolve_source()` raises immediately (no usable source at all) without
+attempting the REST check -- see the function's own docstring for why that
+check runs before REST disambiguation.
+
 Snapshot IDs (manifest provenance)
 --------------------------------------------------------------------------
 Via DuckDB's own `iceberg_snapshots(<table>)` table function -- no direct
@@ -144,6 +181,9 @@ import argparse
 import json
 import re
 import sys
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -154,6 +194,7 @@ CATALOG_NAME = "lake"
 CONTRACT_SCHEMA = "contract"
 SOURCE_SCHEMA = "alice"
 IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+REST_TIMEOUT_SECONDS = 10.0
 
 
 # --------------------------------------------------------------------------
@@ -360,27 +401,162 @@ def connect_catalog(args: argparse.Namespace):
     return con
 
 
-def resolve_source(con: Any, table: str) -> tuple[str, str, str | None]:
+def _rest_get_json(url: str, token: str, *, timeout: float = REST_TIMEOUT_SECONDS) -> dict[str, Any]:
+    """Stdlib-only GET-JSON helper (`urllib.request`) -- the single network
+    transport function used by the fallback-cause REST check below.
+    Isolated as its own module-level function so unit tests can monkeypatch
+    just this network boundary (a fake REST responder keyed by URL) without
+    a real HTTP server or touching `urllib` itself. Raises
+    `urllib.error.HTTPError` / `urllib.error.URLError` / `json.JSONDecodeError`
+    on failure -- callers decide what each means."""
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 -- fixed http(s) catalog-uri, not user-controlled
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def rest_catalog_prefix(catalog_uri: str, warehouse: str, token: str) -> str:
+    """Mirrors the discovery DuckDB's own Iceberg REST-catalog client
+    already performs at ATTACH time: `GET /v1/config?warehouse=<warehouse>`,
+    to resolve Lakekeeper's real per-warehouse REST prefix -- NOT the
+    `--warehouse` name itself. Verified live 2026-07-13 against this repo's
+    kind cluster: `/v1/config?warehouse=default` returned `overrides.prefix`
+    as a warehouse UUID (`2b6351e0-7e14-...`), distinct from the literal
+    `"default"` ATTACH's own `warehouse` argument uses (module docstring's
+    "fallback_reason disambiguation" section). `overrides` wins over
+    `defaults` per the Iceberg REST OpenAPI spec (server-supplied canonical
+    values override client-requested ones)."""
+    url = f"{catalog_uri.rstrip('/')}/v1/config?warehouse={urllib.parse.quote(warehouse, safe='')}"
+    config = _rest_get_json(url, token)
+    overrides = config.get("overrides") or {}
+    defaults = config.get("defaults") or {}
+    prefix = overrides.get("prefix") or defaults.get("prefix")
+    if not prefix:
+        raise RuntimeError(f"/v1/config response has no usable 'prefix' (overrides or defaults): {config!r}")
+    return prefix
+
+
+def check_contract_view_exists(catalog_uri: str, warehouse: str, token: str, namespace: str, table: str) -> bool:
+    """Direct REST check disambiguating WHY `resolve_source()`'s contract-
+    schema read failed (P3T4 review Important 1): duckdb-iceberg cannot
+    read Iceberg REST-catalog views at all (today's true case -- the view
+    genuinely exists server-side) versus the view never having been
+    created (e.g. `alice-ingest apply-views` was never run after
+    `kind-up`) -- DuckDB raises the byte-identical `CatalogException` for
+    both, so this REST call is the only way to tell them apart.
+
+    `GET /v1/<prefix>/namespaces/<namespace>/views` and looks for `table`
+    in the returned `identifiers` list. A 404 (namespace itself absent) and
+    an empty/non-matching identifier list both mean "not found" -- collapsed
+    to a single bool here since `fallback_reason` only needs to distinguish
+    "exists" from "doesn't"; any other HTTP error is re-raised so the caller
+    can report "REST check failed" rather than silently treating it as
+    "not found"."""
+    prefix = rest_catalog_prefix(catalog_uri, warehouse, token)
+    url = f"{catalog_uri.rstrip('/')}/v1/{urllib.parse.quote(prefix, safe='')}/namespaces/{namespace}/views"
+    try:
+        payload = _rest_get_json(url, token)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            return False
+        raise
+    identifiers = payload.get("identifiers") or []
+    return any(entry.get("name") == table for entry in identifiers)
+
+
+def _fallback_reason(
+    *,
+    contract_ref: str,
+    alice_ref: str,
+    contract_exc: Exception,
+    catalog_uri: str,
+    warehouse: str,
+    token: str,
+    namespace: str,
+    table: str,
+) -> str:
+    """Builds `fallback_reason`'s text for the three REST-disambiguated
+    outcomes (P3T4 review Important 1; module docstring's
+    "fallback_reason disambiguation" section has the full rationale)."""
+    try:
+        exists = check_contract_view_exists(catalog_uri, warehouse, token, namespace, table)
+    except Exception as rest_exc:  # noqa: BLE001 -- REST check itself failed; report that plainly, don't guess
+        return (
+            f"{contract_ref} not queryable via DuckDB's Iceberg REST-catalog client "
+            f"(original DuckDB error: {contract_exc}). contract read failed; could not "
+            f"determine cause (REST check failed: {rest_exc}). Falling back to {alice_ref} "
+            f"(dlt-normalized column names, not the ML-consumer contract spellings)."
+        )
+    if exists:
+        return (
+            f"{contract_ref} not queryable via DuckDB's Iceberg REST-catalog client "
+            f"(original DuckDB error: {contract_exc}). Disambiguated via a direct REST "
+            f"check against the catalog (GET .../namespaces/{namespace}/views lists "
+            f"{table!r}): duckdb-iceberg cannot read REST-catalog views (view EXISTS "
+            f"server-side) -- a duckdb-iceberg client limitation, not an ops mistake; see "
+            f"docs/runbooks/ml-extraction.md. Falling back to {alice_ref} (dlt-normalized "
+            f"column names, not the ML-consumer contract spellings)."
+        )
+    return (
+        f"{contract_ref} not queryable via DuckDB's Iceberg REST-catalog client "
+        f"(original DuckDB error: {contract_exc}). Disambiguated via a direct REST check "
+        f"against the catalog (GET .../namespaces/{namespace}/views does not list "
+        f"{table!r}): contract view NOT FOUND server-side -- was apply-views run? (see "
+        f"the ingestion-pipeline runbook, docs/runbooks/ingestion-pipeline.md). Falling "
+        f"back to {alice_ref} (dlt-normalized column names, not the ML-consumer contract "
+        f"spellings)."
+    )
+
+
+def resolve_source(
+    con: Any,
+    table: str,
+    *,
+    catalog_uri: str,
+    warehouse: str,
+    token: str,
+) -> tuple[str, str, str | None]:
     """Returns (schema, fully_qualified_source, fallback_reason). Tries the
     `contract` schema's view first (ML-consumer column spellings); falls
-    back to the raw `alice` table with a warning if it isn't queryable --
-    see the module docstring's "contract vs. alice" section for why this
-    currently always falls back on duckdb-iceberg's current REST-catalog
-    view support."""
+    back to the raw `alice` table if it isn't queryable -- see the module
+    docstring's "contract vs. alice" section for why this currently always
+    falls back on duckdb-iceberg's current REST-catalog view support.
+
+    On fallback, `alice`'s own queryability is checked BEFORE any REST
+    disambiguation is attempted (raising immediately if it, too, is
+    unreadable -- "no usable source at all" is a hard error, not a
+    fallback-reason nuance) -- and only then does a REST call resolve
+    *why* the contract read failed (`_fallback_reason()`, P3T4 review
+    Important 1). This ordering fails fast on the truly-broken case
+    without spending a network round trip on it."""
     contract_ref = f"{CATALOG_NAME}.{CONTRACT_SCHEMA}.{table}"
+    contract_exc: Exception | None = None
     try:
         con.execute(f"SELECT 1 FROM {contract_ref} LIMIT 0")
         return CONTRACT_SCHEMA, contract_ref, None
     except Exception as exc:  # noqa: BLE001 -- any failure means "not readable this way", fall back
-        alice_ref = f"{CATALOG_NAME}.{SOURCE_SCHEMA}.{table}"
-        reason = (
-            f"{contract_ref} not queryable via DuckDB's Iceberg REST-catalog client "
-            f"(duckdb-iceberg does not support reading Iceberg REST-catalog views as of "
-            f"this pin -- verified live 2026-07-13; see docs/runbooks/ml-extraction.md and "
-            f"this script's module docstring). Falling back to {alice_ref} (dlt-normalized "
-            f"column names, not the ML-consumer contract spellings). Original error: {exc}"
-        )
-        return SOURCE_SCHEMA, alice_ref, reason
+        contract_exc = exc
+
+    alice_ref = f"{CATALOG_NAME}.{SOURCE_SCHEMA}.{table}"
+    try:
+        con.execute(f"SELECT 1 FROM {alice_ref} LIMIT 0")
+    except Exception as alice_exc:  # noqa: BLE001 -- neither source is readable: hard error, no fallback possible
+        raise RuntimeError(
+            f"Both {contract_ref} and {alice_ref} are unreadable via DuckDB's Iceberg "
+            f"REST-catalog client -- no usable source for table {table!r}. "
+            f"contract error: {contract_exc}. alice error: {alice_exc}."
+        ) from alice_exc
+
+    reason = _fallback_reason(
+        contract_ref=contract_ref,
+        alice_ref=alice_ref,
+        contract_exc=contract_exc,
+        catalog_uri=catalog_uri,
+        warehouse=warehouse,
+        token=token,
+        namespace=CONTRACT_SCHEMA,
+        table=table,
+    )
+    return SOURCE_SCHEMA, alice_ref, reason
 
 
 def get_snapshot_id(con: Any, table: str) -> int:
@@ -395,8 +571,18 @@ def get_snapshot_id(con: Any, table: str) -> int:
     return row[0]
 
 
-def extract_table(con: Any, table: str, output_dir: Path) -> TableResult:
-    schema, source_ref, fallback_reason = resolve_source(con, table)
+def extract_table(
+    con: Any,
+    table: str,
+    output_dir: Path,
+    *,
+    catalog_uri: str,
+    warehouse: str,
+    token: str,
+) -> TableResult:
+    schema, source_ref, fallback_reason = resolve_source(
+        con, table, catalog_uri=catalog_uri, warehouse=warehouse, token=token
+    )
     if fallback_reason:
         print(f"WARNING: {fallback_reason}", file=sys.stderr)
 
@@ -425,7 +611,17 @@ def run(args: argparse.Namespace) -> int:
 
     con = connect_catalog(args)
     tables = parse_tables(args.tables)
-    results = [extract_table(con, t, output_dir) for t in tables]
+    results = [
+        extract_table(
+            con,
+            t,
+            output_dir,
+            catalog_uri=args.catalog_uri,
+            warehouse=args.warehouse,
+            token=args.token,
+        )
+        for t in tables
+    ]
 
     manifest = build_manifest(
         results,

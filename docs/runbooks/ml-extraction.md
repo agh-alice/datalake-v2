@@ -142,6 +142,37 @@ point this script picks up the contract spellings automatically -- the
 fallback logic is generic "try, catch, fall back", not a special case, so
 no script change will be needed when that happens).
 
+**`fallback_reason` is disambiguated at runtime, not hardcoded (P3T4
+review Important 1).** DuckDB raises the exact same `CatalogException`
+whether the contract view genuinely exists server-side (the case above) or
+the view was never created at all (e.g. `alice-ingest apply-views` was
+never run after `kind-up` -- an ops mistake, not a client limitation) --
+those two situations look identical from DuckDB's side but need very
+different responses. Whenever the contract read fails and the `alice`
+fallback is usable, `resolve_source()` issues a direct REST call against
+the Iceberg REST catalog (`GET <catalog-uri>/v1/config?warehouse=<warehouse>`
+to resolve Lakekeeper's real REST prefix, a warehouse UUID -- NOT the
+`--warehouse` name -- then `GET <catalog-uri>/v1/<prefix>/namespaces/contract/views`)
+to check whether the view is actually listed server-side, and
+`fallback_reason` reports one of three outcomes accordingly:
+
+- view listed -- `"duckdb-iceberg cannot read REST-catalog views (view
+  EXISTS server-side)"` (today's true case, verified live above).
+- view absent from the list, or the `contract` namespace itself 404s --
+  `"contract view NOT FOUND server-side -- was apply-views run?"`, pointing
+  at `docs/runbooks/ingestion-pipeline.md`. This is the ops-mistake case
+  the old hardcoded reason would have silently misattributed to a
+  duckdb-iceberg limitation.
+- the REST check itself fails (network/auth/malformed response) --
+  `"contract read failed; could not determine cause (REST check failed:
+  <err>)"`, rather than guessing.
+
+If `alice` is *also* unreadable, the script raises immediately with both
+underlying errors -- there is no usable source, so no fallback reason to
+disambiguate. See `extract_training_data.py`'s module docstring
+("fallback_reason disambiguation") and `tools/tests/test_extract_training_data.py`'s
+`TestResolveSource` for the full branching, unit-tested without a cluster.
+
 ## 4. Athena/SLURM mapping (old sbatch pattern -> new)
 
 The old script ran via `alice_data_downloader.sh` on PLGrid Athena's A100

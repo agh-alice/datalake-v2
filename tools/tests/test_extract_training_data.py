@@ -1,27 +1,39 @@
 """Unit tests for `tools/extract_training_data.py`'s pure logic: arg
 parsing/validation, the S3-endpoint-string parser, SQL-literal escaping,
-and manifest assembly.
+manifest assembly, and (P3T4 review Important 2) `resolve_source()`'s
+fallback-cause disambiguation branching.
 
-Deliberately does NOT test `connect_catalog()` / `resolve_source()` /
-`get_snapshot_id()` / `extract_table()` -- those touch a live DuckDB
-connection against a real (or port-forwarded) Lakekeeper REST catalog and
-are exercised by the live kind run instead (brief Step 3; see
-docs/runbooks/ml-extraction.md and `extract_training_data.py`'s module
-docstring for that evidence). This split matches the brief's instruction:
-"the script's pure logic ... gets unit tests runnable WITHOUT a cluster
-... the end-to-end proof is the live kind run."
+Deliberately does NOT test `connect_catalog()` / `get_snapshot_id()` /
+`extract_table()` end-to-end, or the REST helpers' actual HTTP transport --
+those touch a live DuckDB connection and/or a real (or port-forwarded)
+Lakekeeper REST catalog and are exercised by the live kind run instead
+(brief Step 3; see docs/runbooks/ml-extraction.md and
+`extract_training_data.py`'s module docstring for that evidence). This
+split matches the brief's instruction: "the script's pure logic ... gets
+unit tests runnable WITHOUT a cluster ... the end-to-end proof is the live
+kind run."
+
+`resolve_source()` itself IS unit-tested (P3T4 review Important 2): it only
+takes a DuckDB connection object and, on fallback, makes REST calls through
+the module-level `_rest_get_json()` function -- both are faked below
+(`FakeConnection`, `_fake_rest_get_json()`), so the branching is exercised
+without a live cluster.
 
 Run with: python -m unittest discover -s tools/tests
 (stdlib unittest only -- no pytest dependency needed to test a script whose
-own runtime dependency surface is deliberately just duckdb.)
+own runtime dependency surface is deliberately just duckdb; pytest also
+runs this file fine via its unittest.TestCase discovery, if pytest happens
+to be installed.)
 """
 
 from __future__ import annotations
 
 import sys
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -216,6 +228,207 @@ class TestBuildManifest(unittest.TestCase):
             warehouse="default",
         )
         json.dumps(manifest)  # must not raise
+
+
+class FakeConnection:
+    """Mimics `duckdb.DuckDBPyConnection` just enough for `resolve_source()`:
+    it only ever calls `con.execute(sql)` (no `.fetchone()`/`.fetchall()`),
+    once per candidate ref (`lake.contract.<table>`, then possibly
+    `lake.alice.<table>`), to probe queryability. `raise_for` names the
+    refs (substring-matched against the executed SQL) that should raise,
+    simulating a DuckDB `CatalogException` -- everything else succeeds."""
+
+    def __init__(self, *, raise_for: frozenset[str] = frozenset()):
+        self.raise_for = raise_for
+        self.executed: list[str] = []
+
+    def execute(self, sql: str, *args, **kwargs):
+        self.executed.append(sql)
+        for ref in self.raise_for:
+            if ref in sql:
+                raise RuntimeError(f"simulated CatalogException: {ref} does not exist! (sql: {sql})")
+        return self
+
+
+def _fake_rest_get_json(*, config_response=None, config_error=None, views_response=None, views_error=None):
+    """Fake REST responder standing in for `extract_training_data._rest_get_json`
+    (the module's one network-transport function -- see that function's
+    docstring). Dispatches on URL shape: `/v1/config` -> the warehouse-prefix
+    discovery call, `.../namespaces/<ns>/views` -> the view-listing call.
+    Raises `AssertionError` on any other URL so a test can't silently pass
+    by hitting an un-mocked code path."""
+
+    def fake(url: str, token: str, *, timeout: float = etd.REST_TIMEOUT_SECONDS):
+        if "/v1/config" in url:
+            if config_error is not None:
+                raise config_error
+            return config_response
+        if "/namespaces/" in url and url.endswith("/views"):
+            if views_error is not None:
+                raise views_error
+            return views_response
+        raise AssertionError(f"unexpected REST URL in test: {url!r}")
+
+    return fake
+
+
+class TestResolveSource(unittest.TestCase):
+    CATALOG_URI = "http://127.0.0.1:18181/catalog"
+    WAREHOUSE = "default"
+    TOKEN = "dummy"
+    # Verified live 2026-07-13 against this repo's kind cluster: Lakekeeper's
+    # /v1/config?warehouse=default returns `overrides.prefix` as a warehouse
+    # UUID, NOT the warehouse name -- see rest_catalog_prefix()'s docstring.
+    CONFIG_RESPONSE = {
+        "overrides": {"prefix": "2b6351e0-7e14-11f1-806a-db43a36e9447"},
+        "defaults": {"prefix": "should-not-be-used-when-overrides-present"},
+    }
+
+    def _resolve(self, con, table="job_info"):
+        return etd.resolve_source(
+            con,
+            table,
+            catalog_uri=self.CATALOG_URI,
+            warehouse=self.WAREHOUSE,
+            token=self.TOKEN,
+        )
+
+    def test_contract_works_no_fallback(self):
+        con = FakeConnection()
+        schema, ref, reason = self._resolve(con)
+        self.assertEqual(schema, "contract")
+        self.assertEqual(ref, "lake.contract.job_info")
+        self.assertIsNone(reason)
+        # No REST call needed when the contract read succeeds outright.
+        self.assertEqual(con.executed, ["SELECT 1 FROM lake.contract.job_info LIMIT 0"])
+
+    def test_contract_fails_view_exists_gives_upstream_reason(self):
+        con = FakeConnection(raise_for=frozenset({"lake.contract.job_info"}))
+        views_response = {"identifiers": [{"namespace": ["contract"], "name": "job_info"}]}
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_response=views_response)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            schema, ref, reason = self._resolve(con)
+        self.assertEqual(schema, "alice")
+        self.assertEqual(ref, "lake.alice.job_info")
+        self.assertIsNotNone(reason)
+        self.assertIn("duckdb-iceberg cannot read REST-catalog views (view EXISTS server-side)", reason)
+
+    def test_contract_fails_view_absent_from_list_gives_apply_views_reason(self):
+        con = FakeConnection(raise_for=frozenset({"lake.contract.job_info"}))
+        views_response = {"identifiers": [{"namespace": ["contract"], "name": "some_other_table"}]}
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_response=views_response)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            schema, ref, reason = self._resolve(con)
+        self.assertEqual(schema, "alice")
+        self.assertIn("contract view NOT FOUND server-side", reason)
+        self.assertIn("apply-views", reason)
+
+    def test_contract_fails_views_endpoint_404_gives_apply_views_reason(self):
+        con = FakeConnection(raise_for=frozenset({"lake.contract.job_info"}))
+        http_404 = urllib.error.HTTPError(url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_error=http_404)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            schema, ref, reason = self._resolve(con)
+        self.assertEqual(schema, "alice")
+        self.assertIn("contract view NOT FOUND server-side", reason)
+        self.assertIn("apply-views", reason)
+
+    def test_contract_fails_rest_check_itself_fails_gives_unknown_reason(self):
+        con = FakeConnection(raise_for=frozenset({"lake.contract.job_info"}))
+        fake_rest = _fake_rest_get_json(config_error=RuntimeError("network unreachable"))
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            schema, ref, reason = self._resolve(con)
+        self.assertEqual(schema, "alice")
+        self.assertIn("contract read failed; could not determine cause (REST check failed:", reason)
+        self.assertIn("network unreachable", reason)
+
+    def test_contract_fails_views_endpoint_non_404_error_gives_unknown_reason(self):
+        con = FakeConnection(raise_for=frozenset({"lake.contract.job_info"}))
+        http_500 = urllib.error.HTTPError(url="x", code=500, msg="Internal Server Error", hdrs=None, fp=None)
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_error=http_500)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            schema, ref, reason = self._resolve(con)
+        self.assertEqual(schema, "alice")
+        self.assertIn("contract read failed; could not determine cause (REST check failed:", reason)
+
+    def test_alice_also_fails_raises_hard_error_without_rest_call(self):
+        con = FakeConnection(raise_for=frozenset({"lake.contract.job_info", "lake.alice.job_info"}))
+        # Deliberately NOT mocking _rest_get_json: alice's own readability is
+        # checked before any REST disambiguation is attempted, so a real
+        # network call must never happen on this path (see resolve_source()'s
+        # ordering rationale in its docstring). If the code changed to call
+        # the real urllib transport here, this test would hang/fail instead
+        # of asserting cleanly -- that failure mode is the point.
+        with self.assertRaises(RuntimeError) as ctx:
+            self._resolve(con)
+        message = str(ctx.exception)
+        self.assertIn("lake.contract.job_info", message)
+        self.assertIn("lake.alice.job_info", message)
+        self.assertIn("unreadable", message)
+
+
+class TestRestCatalogPrefix(unittest.TestCase):
+    def test_prefers_overrides_prefix(self):
+        fake_rest = _fake_rest_get_json(
+            config_response={"overrides": {"prefix": "uuid-1"}, "defaults": {"prefix": "uuid-2"}}
+        )
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            prefix = etd.rest_catalog_prefix("http://127.0.0.1:18181/catalog", "default", "dummy")
+        self.assertEqual(prefix, "uuid-1")
+
+    def test_falls_back_to_defaults_prefix_when_overrides_missing(self):
+        fake_rest = _fake_rest_get_json(config_response={"overrides": {}, "defaults": {"prefix": "uuid-2"}})
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            prefix = etd.rest_catalog_prefix("http://127.0.0.1:18181/catalog", "default", "dummy")
+        self.assertEqual(prefix, "uuid-2")
+
+    def test_raises_when_no_prefix_anywhere(self):
+        fake_rest = _fake_rest_get_json(config_response={"overrides": {}, "defaults": {}})
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            with self.assertRaises(RuntimeError):
+                etd.rest_catalog_prefix("http://127.0.0.1:18181/catalog", "default", "dummy")
+
+
+class TestCheckContractViewExists(unittest.TestCase):
+    CONFIG_RESPONSE = {"overrides": {"prefix": "uuid-1"}, "defaults": {}}
+
+    def test_true_when_table_listed(self):
+        views_response = {"identifiers": [{"namespace": ["contract"], "name": "job_info"}]}
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_response=views_response)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            self.assertTrue(
+                etd.check_contract_view_exists(
+                    "http://127.0.0.1:18181/catalog", "default", "dummy", "contract", "job_info"
+                )
+            )
+
+    def test_false_when_identifiers_empty(self):
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_response={"identifiers": []})
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            self.assertFalse(
+                etd.check_contract_view_exists(
+                    "http://127.0.0.1:18181/catalog", "default", "dummy", "contract", "job_info"
+                )
+            )
+
+    def test_false_on_404(self):
+        http_404 = urllib.error.HTTPError(url="x", code=404, msg="Not Found", hdrs=None, fp=None)
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_error=http_404)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            self.assertFalse(
+                etd.check_contract_view_exists(
+                    "http://127.0.0.1:18181/catalog", "default", "dummy", "contract", "job_info"
+                )
+            )
+
+    def test_reraises_non_404_http_error(self):
+        http_500 = urllib.error.HTTPError(url="x", code=500, msg="Internal Server Error", hdrs=None, fp=None)
+        fake_rest = _fake_rest_get_json(config_response=self.CONFIG_RESPONSE, views_error=http_500)
+        with mock.patch.object(etd, "_rest_get_json", fake_rest):
+            with self.assertRaises(urllib.error.HTTPError):
+                etd.check_contract_view_exists(
+                    "http://127.0.0.1:18181/catalog", "default", "dummy", "contract", "job_info"
+                )
 
 
 if __name__ == "__main__":
