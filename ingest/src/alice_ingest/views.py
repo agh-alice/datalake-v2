@@ -300,18 +300,32 @@ KNOWN_NON_CONTRACT_HELPERS: tuple[str, ...] = ("jdl_parse_ok", "full_jdl_raw", "
 @dataclass(frozen=True)
 class DriftResult:
     """One table's `SHOW COLUMNS FROM lake.alice.<table>` diffed against
-    everything this module currently accounts for. `unmapped_jdl_columns` is
-    the actionable one (contract_columns.py needs regenerating);
-    `other_unmapped_columns` is informational only -- never causes
-    `--strict` to fail (module docstring)."""
+    everything this module currently accounts for. `unmapped_jdl_columns`
+    and `missing_mapped_columns` are the actionable ones (contract_columns.py
+    needs regenerating); `other_unmapped_columns` is informational only --
+    never causes `--strict` to fail (module docstring).
+
+    `missing_mapped_columns` is the SUBTRACTIVE direction, added after the
+    2026-07-13 production-data dress rehearsal: a mapped or passthrough
+    column that does NOT exist on the live table (fixture-era mapping vs a
+    freshly-reset, production-fed schema). Unlike additive drift, this one
+    makes the view DDL un-appliable outright -- Trino rejects the CREATE
+    with COLUMN_NOT_FOUND -- which previously surfaced as a raw traceback
+    from `apply_views()` before drift detection ever ran (research/
+    2026-07-13_production-data-dress-rehearsal.md)."""
 
     table: str
     unmapped_jdl_columns: tuple[tuple[str, str], ...] = ()
     other_unmapped_columns: tuple[tuple[str, str], ...] = ()
+    missing_mapped_columns: tuple[str, ...] = ()
 
     @property
     def has_jdl_drift(self) -> bool:
         return bool(self.unmapped_jdl_columns)
+
+    @property
+    def has_missing_mapped(self) -> bool:
+        return bool(self.missing_mapped_columns)
 
 
 def _known_live_columns(spec: _TableSpec) -> set[str]:
@@ -321,11 +335,14 @@ def _known_live_columns(spec: _TableSpec) -> set[str]:
 
 def check_table_drift(client: Any, table: str, spec: _TableSpec) -> DriftResult:
     """Runs `SHOW COLUMNS FROM lake.alice.<table>` (the SOURCE table, not
-    the contract view -- module docstring) and classifies every live column
-    not already accounted for by `spec`: a `jdl__*` name is actionable
-    drift, anything else is informational only."""
+    the contract view -- module docstring) and classifies BOTH drift
+    directions: every live column not already accounted for by `spec`
+    (a `jdl__*` name is actionable drift, anything else informational),
+    and every `spec`-referenced column the live table lacks (actionable:
+    the view DDL would select a nonexistent column)."""
     rows = client.run(f"SHOW COLUMNS FROM {CATALOG}.{SOURCE_SCHEMA}.{table}")
     known = _known_live_columns(spec)
+    live_names = {row[0] for row in rows}
     unmapped_jdl: list[tuple[str, str]] = []
     other_unmapped: list[tuple[str, str]] = []
     for row in rows:
@@ -333,10 +350,17 @@ def check_table_drift(client: Any, table: str, spec: _TableSpec) -> DriftResult:
         if name in known:
             continue
         (unmapped_jdl if name.startswith("jdl__") else other_unmapped).append((name, col_type))
+    # Subtractive direction: only columns the view DDL actually SELECTs
+    # (mapped targets + passthrough) can break it -- DLT_METADATA_COLUMNS /
+    # KNOWN_NON_CONTRACT_HELPERS entries outside `spec.passthrough` are
+    # never referenced by build_view_ddl and so never belong here.
+    ddl_referenced = [v for v in spec.columns.values() if v is not None] + list(spec.passthrough)
+    missing = tuple(name for name in ddl_referenced if name not in live_names)
     return DriftResult(
         table=table,
         unmapped_jdl_columns=tuple(unmapped_jdl),
         other_unmapped_columns=tuple(other_unmapped),
+        missing_mapped_columns=missing,
     )
 
 
@@ -361,6 +385,14 @@ def _report_drift(results: list[DriftResult]) -> bool:
                 f"needed): [{cols}]",
                 file=sys.stderr,
             )
+        if result.missing_mapped_columns:
+            cols = ", ".join(result.missing_mapped_columns)
+            print(
+                f"WARNING: mapped columns missing from live schema in "
+                f"{CATALOG}.{SOURCE_SCHEMA}.{result.table} (contract regeneration "
+                f"needed; view DDL cannot be applied): [{cols}]",
+                file=sys.stderr,
+            )
         if result.other_unmapped_columns:
             cols = ", ".join(f"{name}:{col_type}" for name, col_type in result.other_unmapped_columns)
             print(
@@ -379,18 +411,40 @@ def run(env: Mapping[str, str], strict: bool = False) -> int:
 
     `strict=True` (CLI: `apply-views --strict`) turns actionable jdl__
     drift (module docstring, "Drift detection") into exit code 2 instead of
-    a warning -- the Plan 4 cutover gate."""
+    a warning -- the Plan 4 cutover gate.
+
+    Drift is checked BEFORE the DDL is applied (order flipped by the
+    2026-07-13 dress-rehearsal fix): subtractive drift (mapped columns
+    missing live -- DriftResult.missing_mapped_columns) makes the CREATE
+    VIEW statements themselves un-appliable, so attempting them first
+    could only ever produce a raw Trino COLUMN_NOT_FOUND traceback. When
+    any table has missing mapped columns, this reports the drift and exits
+    2 in BOTH modes without touching any DDL -- a non-strict exit 0 would
+    misreport 'views applied' for views that were never applied. Additive
+    drift keeps its existing semantics (warn + exit 0 non-strict, exit 2
+    strict) and never blocks the DDL."""
     trino_uri = env.get("TRINO_URI")
     if not trino_uri:
         raise SystemExit("alice-ingest: required env var TRINO_URI is not set")
 
     client = TrinoClient(base_uri=trino_uri.rstrip("/"))
+    drift_results = check_drift(client)
+    any_missing_mapped = any(r.has_missing_mapped for r in drift_results)
+    any_jdl_drift = _report_drift(drift_results)
+    if any_missing_mapped:
+        print(
+            "apply-views: ABORTED before DDL -- mapped columns missing from the "
+            "live schema (see WARNING above); regenerate contract_columns.py "
+            "per its module docstring",
+            file=sys.stderr,
+        )
+        return 2
+
     executed = apply_views(client)
     for table in TABLE_SPECS:
         print(f"CONTRACT VIEW applied: {CATALOG}.{CONTRACT_SCHEMA}.{table}")
     print(f"apply-views: {len(executed)} view(s) applied")
 
-    any_jdl_drift = _report_drift(check_drift(client))
     if strict and any_jdl_drift:
         return 2
     return 0

@@ -396,8 +396,17 @@ class TestRun:
 
     def test_applies_views_and_prints_a_summary(self, monkeypatch, capsys):
         from alice_ingest import views as views_module
+        from alice_ingest.views import TABLE_SPECS
 
         applied = []
+        # Supply the exact no-drift live schema for each table. A prior
+        # version of this test returned [] for every statement and relied
+        # on "vacuously no drift" -- that vacuous truth is gone by design
+        # (2026-07-13 dress-rehearsal fix): an EMPTY live column list now
+        # correctly reads as "every mapped column missing", the un-appliable
+        # DDL condition, and aborts with exit 2 instead of pretending to
+        # apply views over a schema that cannot satisfy them.
+        columns_by_table = {table: _known_live_rows(spec) for table, spec in TABLE_SPECS.items()}
 
         class RecordingClient:
             def __init__(self, base_uri, user="alice-ingest", timeout=30.0):
@@ -405,6 +414,9 @@ class TestRun:
 
             def run(self, sql, poll_interval=1.0):
                 applied.append(sql)
+                for table, rows in columns_by_table.items():
+                    if sql == f"SHOW COLUMNS FROM lake.alice.{table}":
+                        return rows
                 return []
 
         monkeypatch.setattr(views_module, "TrinoClient", RecordingClient)
@@ -417,8 +429,6 @@ class TestRun:
         assert "CONTRACT VIEW applied: lake.contract.trace" in out
         assert "CONTRACT VIEW applied: lake.contract.mon_jdls_parsed" in out
         assert "apply-views: 3 view(s) applied" in out
-        # No SHOW COLUMNS rows were supplied (RecordingClient returns [] for
-        # every statement) -- vacuously no drift, no warning either way.
         assert "WARNING" not in capsys.readouterr().err
 
 
@@ -643,3 +653,139 @@ class TestRunDriftReporting:
         exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"})
 
         assert exit_code == 0
+
+
+class TestSubtractiveDrift:
+    """The 2026-07-13 production-data dress rehearsal crashed apply-views
+    with a raw Trino COLUMN_NOT_FOUND traceback: the mapping referenced
+    fixture-era `jdl__*` columns that did not exist on the freshly-reset,
+    production-fed table (research/2026-07-13_production-data-dress-
+    rehearsal.md). Drift detection previously only looked one way (live
+    columns the mapping doesn't know); a mapped or passthrough column
+    MISSING from the live schema is equally actionable drift -- and worse,
+    it makes the view DDL un-appliable, so it must be caught BEFORE any DDL
+    runs and reported like drift, not as a traceback."""
+
+    def test_mapped_column_missing_live_is_reported(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        rows = [r for r in _known_live_rows(spec) if r[0] != "jdl__cpu_cores"]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": rows})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert "jdl__cpu_cores" in result.missing_mapped_columns
+        assert result.has_missing_mapped is True
+
+    def test_passthrough_column_missing_live_is_reported(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        rows = [r for r in _known_live_rows(spec) if r[0] != "full_jdl_raw"]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": rows})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert "full_jdl_raw" in result.missing_mapped_columns
+
+    def test_no_missing_when_live_matches_mapping(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        client = FakeShowColumnsClient({"mon_jdls_parsed": _known_live_rows(spec)})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert result.missing_mapped_columns == ()
+        assert result.has_missing_mapped is False
+
+    def test_missing_and_unmapped_can_coexist(self):
+        from alice_ingest.views import TABLE_SPECS, check_table_drift
+
+        spec = TABLE_SPECS["mon_jdls_parsed"]
+        rows = [r for r in _known_live_rows(spec) if r[0] != "jdl__cpu_cores"]
+        rows.append(["jdl__brand_new", "varchar", "", None])
+        client = FakeShowColumnsClient({"mon_jdls_parsed": rows})
+
+        result = check_table_drift(client, "mon_jdls_parsed", spec)
+
+        assert "jdl__cpu_cores" in result.missing_mapped_columns
+        assert result.unmapped_jdl_columns == (("jdl__brand_new", "varchar"),)
+
+
+class TestRunSubtractiveDrift:
+    """run()-level: missing-mapped drift must abort BEFORE any DDL (the DDL
+    cannot succeed -- Trino would COLUMN_NOT_FOUND), print an actionable
+    WARNING naming the columns, and exit 2 in BOTH modes (non-strict exit 0
+    would misreport 'views applied' when nothing was applied)."""
+
+    @staticmethod
+    def _recording_client_factory(columns_by_table: dict[str, list[list]]):
+        statements: list[str] = []
+
+        class RecordingClient:
+            recorded = statements
+
+            def __init__(self, base_uri, user="alice-ingest", timeout=30.0):
+                self.base_uri = base_uri
+
+            def run(self, sql, poll_interval=1.0):
+                statements.append(sql)
+                for table, rows in columns_by_table.items():
+                    if sql == f"SHOW COLUMNS FROM lake.alice.{table}":
+                        return rows
+                return []
+
+        return RecordingClient
+
+    def _columns_with_missing_mapped(self):
+        from alice_ingest.views import TABLE_SPECS
+
+        columns = {table: _known_live_rows(spec) for table, spec in TABLE_SPECS.items()}
+        columns["mon_jdls_parsed"] = [
+            r for r in columns["mon_jdls_parsed"] if r[0] != "jdl__cpu_cores"
+        ]
+        return columns
+
+    def test_missing_mapped_aborts_before_any_ddl_and_exits_two(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        factory = self._recording_client_factory(self._columns_with_missing_mapped())
+        monkeypatch.setattr(views_module, "TrinoClient", factory)
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 2
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert "jdl__cpu_cores" in err
+        assert "missing" in err
+        assert "contract regeneration" in err
+        assert not any(
+            s.startswith("CREATE") for s in factory.recorded
+        ), f"DDL must not run against a schema it cannot apply to: {factory.recorded}"
+
+    def test_missing_mapped_with_strict_also_exits_two(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+
+        factory = self._recording_client_factory(self._columns_with_missing_mapped())
+        monkeypatch.setattr(views_module, "TrinoClient", factory)
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"}, strict=True)
+
+        assert exit_code == 2
+        assert "jdl__cpu_cores" in capsys.readouterr().err
+
+    def test_no_missing_still_applies_views_and_exits_zero(self, monkeypatch, capsys):
+        from alice_ingest import views as views_module
+        from alice_ingest.views import TABLE_SPECS
+
+        columns = {table: _known_live_rows(spec) for table, spec in TABLE_SPECS.items()}
+        factory = self._recording_client_factory(columns)
+        monkeypatch.setattr(views_module, "TrinoClient", factory)
+
+        exit_code = views_module.run({"TRINO_URI": "http://trino.trino.svc:8080"})
+
+        assert exit_code == 0
+        assert any(s.startswith("CREATE OR REPLACE VIEW") for s in factory.recorded)

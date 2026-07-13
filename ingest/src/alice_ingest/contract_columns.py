@@ -95,13 +95,30 @@ not duplicated here.
 How to regenerate this mapping
 --------------------------------------------------------------------------
 This module is a STATIC snapshot, not computed at import/run time (module
-docstring, line 1). It goes stale the moment dlt evolves a new `jdl__*`
-column from production JDL data that this file has never seen -- exactly
-the drift `views.py`'s `check_drift()`/`apply-views --strict` detects (see
-that module's docstring, "Drift detection"). When `apply-views` (non-strict)
-prints a `WARNING: unmapped jdl__ columns present live ... (contract
-regeneration needed)` line, or `apply-views --strict` exits 2 with the same
-message, regenerate this file:
+docstring, line 1). It goes stale in BOTH directions -- the second was
+proven live by the 2026-07-13 production-data dress rehearsal (research/
+2026-07-13_production-data-dress-rehearsal.md), which this procedure's
+first execution against real data also debugged:
+
+  - ADDITIVE: dlt evolves a new `jdl__*` column from production JDL data
+    this file has never seen -> `apply-views` prints `WARNING: unmapped
+    jdl__ columns present live ... (contract regeneration needed)`
+    (non-strict exits 0; `--strict` exits 2). NOTE: ALL unmapped live
+    `jdl__*` columns land in this one WARNING, whether or not they have a
+    contract counterpart -- the `INFO:` line is only ever for non-`jdl__`
+    columns. Which bucket a warned column belongs in (a mapping value vs
+    `*_PASSTHROUGH`) is decided by step 3's normalization match, not by
+    which stderr line it printed on.
+
+  - SUBTRACTIVE: a column this mapping references does NOT exist on the
+    live table (a fixture-era mapping meeting a freshly-reset,
+    production-fed schema is the proven case) -> the view DDL is
+    un-appliable outright, so `apply-views` reports `WARNING: mapped
+    columns missing from live schema ... (contract regeneration needed;
+    view DDL cannot be applied)` and exits 2 in BOTH modes, without
+    touching any DDL.
+
+When either WARNING appears, regenerate this file:
 
   1. Re-fetch the upstream dtypes contract (source 1 above): `gh api
      repos/agh-alice/alice_jobs_package/contents/src/alice_jobs_package/
@@ -124,10 +141,15 @@ message, regenerate this file:
   4. Update `MON_JDLS_PARSED_COLUMNS` (flip the matched field's value from
      `None` to its live `jdl__*` name) -- or `JOB_INFO_COLUMNS`/
      `TRACE_COLUMNS`/the relevant `*_PASSTHROUGH` tuple if the drift is on
-     one of those tables instead. If the new live column has NO contract
-     counterpart at all (an `other_unmapped_columns` / `INFO`-level result,
-     not `WARNING`), add it to that table's `*_PASSTHROUGH` tuple instead of
-     leaving it unmapped and unexplained.
+     one of those tables instead. If a warned live `jdl__*` column matches
+     NO contract field under step 3's normalization, add it to that table's
+     `*_PASSTHROUGH` tuple instead of leaving it unmapped and unexplained.
+     (An earlier version of this step claimed no-counterpart columns arrive
+     as `INFO`-level results -- wrong: `INFO` is only for non-`jdl__` names;
+     see the ADDITIVE note above.) For SUBTRACTIVE drift, do the reverse:
+     flip the affected field's value back to `None` (or remove the entry
+     from `*_PASSTHROUGH`) so the view stops referencing a column the live
+     schema does not have.
   5. Run `alice-ingest apply-views --strict` again -- exit 0 with no
      WARNING/stderr output confirms the regeneration closed the gap
      `check_drift()` found. (On kind: rebuild+push the ingest image first,

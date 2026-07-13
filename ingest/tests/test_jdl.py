@@ -202,3 +202,98 @@ class TestLpmCasingMergeAtIngestion:
 
         assert result["jdl"]["LPMPassName"] == "passC2"
         assert "LPMPASSNAME" not in result["jdl"]
+
+
+class TestParseJdlEscapedProductionEncoding:
+    """Production `mon_jdls.full_jdl` values are stored as ESCAPED JSON text
+    (the body of a JSON string literal: literal `\\n`, `\\"`, `\\/` two-char
+    sequences, no real newlines) -- discovered live in the 2026-07-13
+    production-data dress rehearsal, where 146,896/146,896 real JDLs failed
+    `json.loads` and every row landed in `full_jdl_raw` (research/2026-07-13_
+    production-data-dress-rehearsal.md). Gen-1's own ETL confirms the
+    encoding is production-real: `postgres_dump.py` applies an
+    `unescape_json_udf` before schema inference (agh-alice/datalake,
+    src/spark/postgres_dump.py). `parse_jdl` must therefore fall back to
+    JSON-string-body decoding when direct `json.loads` fails, and only then
+    give up into the preserved-raw path.
+    """
+
+    @staticmethod
+    def _escape(jdl_dict: dict) -> str:
+        """Render a dict exactly the way production stores it: pretty JSON,
+        then re-serialized as a JSON string literal, outer quotes stripped --
+        yields the observed `{\\n  \\"User\\": ...` shape."""
+        text = json.dumps(jdl_dict, indent=2)
+        return json.dumps(text)[1:-1]
+
+    def test_escaped_valid_jdl_parses_with_flag_true(self):
+        jdl = {"User": "aliprod", "TTL": 72000, "LPMPassName": "apass4"}
+        raw = self._escape(jdl)
+        assert raw.startswith('{\\n')  # the production shape, not clean JSON
+        record = {"job_id": 3001, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is True
+        assert result["jdl"] == jdl
+        assert "full_jdl" not in result
+        assert "full_jdl_raw" not in result
+
+    def test_escaped_legacy_lpm_casing_is_merged_after_decoding(self):
+        # 13,243 of the rehearsal window's 146,896 real JDLs carry the
+        # legacy ALL-CAPS spelling INSIDE the escaped encoding -- the LPM
+        # merge must still apply after the fallback decode.
+        raw = self._escape({"TTL": 72000, "LPMPASSNAME": "apass1"})
+        record = {"job_id": 3002, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is True
+        assert result["jdl"]["LPMPassName"] == "apass1"
+        assert "LPMPASSNAME" not in result["jdl"]
+
+    def test_escaped_solidus_sequence_decodes_to_plain_slash(self):
+        # Production JDLs escape forward slashes JSON-style (`QC\/(*.log`) --
+        # seen verbatim in the rehearsal sample. json's string-body decode
+        # handles `\/` natively; unicode-escape (gen-1's approach) does not.
+        raw = '{\\n  \\"Output\\": \\"qc_log_archive.zip:QC\\/*.log@disk=1\\"\\n}'
+        record = {"job_id": 3003, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is True
+        assert result["jdl"]["Output"] == "qc_log_archive.zip:QC/*.log@disk=1"
+
+    def test_escaped_garbage_preserves_the_original_raw_not_the_decoded_text(self):
+        # The fallback's intermediate decode may SUCCEED while the decoded
+        # text is still not valid JSON -- the preserved raw must be the
+        # ORIGINAL landing value (audit trail), never the half-decoded form.
+        raw = '{\\n  \\"TTL\\": \\"3600\\", this is not valid json'
+        record = {"job_id": 3004, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is False
+        assert result["full_jdl_raw"] == raw
+        assert "jdl" not in result
+
+    def test_escaped_scalar_root_is_still_a_parse_failure(self):
+        # "just text" escapes to itself; the wrapped decode yields a str,
+        # not a dict -- same root-type rule as the direct path.
+        record = {"job_id": 3005, "full_jdl": "just an escaped\\nstring"}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is False
+        assert result["full_jdl_raw"] == "just an escaped\\nstring"
+
+    def test_clean_json_never_takes_the_fallback_path(self):
+        # Direct parse short-circuits: a clean-JSON value whose CONTENT
+        # happens to look escape-ish must not be double-decoded.
+        raw = '{"Comment": "literal backslash-n here: \\\\n stays two chars"}'
+        record = {"job_id": 3006, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is True
+        assert result["jdl"]["Comment"] == "literal backslash-n here: \\n stays two chars"
