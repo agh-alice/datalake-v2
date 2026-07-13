@@ -1,7 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "b9f2c21a9a88f27435dd655439cb7e37a242e26d",
+  "drySha": "49c3fb761ed3b4f06a7cc09d45663a7aae0c049a",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T00:53:45Z",
-  "subject": "chore: pin ingest image digest for nightly-overlap guard + retention runbook note"
+  "date": "2026-07-13T02:02:06Z",
+  "subject": "docs: runbook + README updates for the full Plan-3 surface",
+  "body": "- README: component table covering the whole platform surface as of\n  v0.3.0 (ArgoCD, CloudNativePG, ESO, kube-prometheus-stack, MinIO,\n  Lakekeeper, Argo Workflows, Trino, chart/, alice-ingest, the DuckDB\n  extraction tool) -- this repo had no such table before.\n- ingestion-pipeline.md: architecture diagram + a new \"query layer\"\n  paragraph documenting Trino, lake.contract views, apply-views (and that\n  it's manual-only, not scheduled), and the freshness/maintenance Trino\n  steps; env-var table gains FRESHNESS_MAX_AGE_HOURS (the one entry Task\n  3's fixer hadn't added -- TRINO_MAINTENANCE_RETENTION_THRESHOLD was\n  already there); subcommand list gains apply-views, check-freshness,\n  run-trino-maintenance (previously undocumented).\n- backfill.md: Task 3 review residual Minor -- the tandem-raise\n  paragraph's lead-in sentence had the TRINO_MAINTENANCE_RETENTION_\n  THRESHOLD/MAINTENANCE_OLDER_THAN_DAYS scope backwards (claimed the env\n  var touches MAINTENANCE_OLDER_THAN_DAYS, then the very next sentence\n  said the opposite); corrected to match maintenance.py's actual\n  behavior (the env var is Trino-side only).\n- maintenance.py: Task 3 review residual Minor -- one-paragraph docstring\n  note that the nightly-overlap guard only sees CronWorkflow-labeled\n  Workflows (the workflows.argoproj.io/cron-workflow label Argo attaches\n  to scheduled runs only), so a manually kubectl-created ingest Workflow\n  (e.g. hack/run-ingest-once.sh) is invisible to it and won't defer a\n  concurrent manual maintenance trigger -- accepted, the operator running\n  both by hand already owns that window.\n"
 }
