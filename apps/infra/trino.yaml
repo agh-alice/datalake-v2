@@ -47,7 +47,28 @@ spec:
     chart: trino
     targetRevision: "1.40.0"
     helm:
-      valuesObject:
+      # `values` (literal YAML block string), NOT `valuesObject`
+      # (structured), deliberately -- Plan 3 Task 5 clean-room finding,
+      # caught live by kind-verify's SHOW CATALOGS hard gate. The
+      # `tpch: null`/`tpcds: null` entries at the bottom are Helm's
+      # documented mechanism for DELETING a chart-default map key (the
+      # chart ships tpch/tpcds demo catalogs by default), and null-valued
+      # keys inside a structured valuesObject do NOT survive the
+      # Kubernetes API server: a plain `kubectl apply` merge-patch drops
+      # them on updates (the Task 1 fixer's original gotcha, worked
+      # around then with `kubectl replace`), and -- the Task 5 clean-room
+      # DISPROOF of that note's "fresh create preserves them" hypothesis
+      # -- a from-scratch `kubectl apply -f` CREATE (hack/kind-up.sh's
+      # path) strips them too: the live Application object held only
+      # lake/landing under catalogs, Helm's values merge saw no null
+      # overrides, and the demo catalogs came back on a brand-new
+      # cluster (SHOW CATALOGS returned tpch/tpcds; the gate failed
+      # exactly as designed). A block-scalar string is opaque to the API
+      # server -- no structured-merge/null-pruning semantics can touch
+      # its contents on ANY path (create, apply, replace, ArgoCD sync) --
+      # so the nulls reach Helm's coalesce byte-identical,
+      # deterministically, and SHOW CATALOGS stays lake/landing/system.
+      values: |
         # Coordinator-only on kind (resource-frugality constraint, JVM heap
         # <= 2G). `server.workers: 0` is not merely "zero replicas" -- the
         # chart's deployment-worker.yaml/configmap-worker.yaml templates are
