@@ -1,8 +1,8 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "644e6ea8df7793547f0bb8d55e6ffcf69fa533e3",
+  "drySha": "a94d429c9dd34459611b8eea39e5cf8bcc67d383",
   "author": "groundnuty <groundnuty@gmail.com>",
-  "date": "2026-07-13T15:19:49Z",
-  "subject": "chore: pin ingest image digest for the JDL value-canonicalization fix",
-  "body": "Digest 43135084 resolved from GHCR for commit cebae62 and verified via\nbuildx imagetools inspect.\n"
+  "date": "2026-07-14T04:08:33Z",
+  "subject": "chore: pin ingest image digest for the production-regenerated mapping",
+  "body": "Digest 898ae4ee resolved from GHCR for commit 15b44d4 (full_jdl_raw hint\n+ mapping regeneration) and verified via buildx imagetools inspect.\n"
 }
