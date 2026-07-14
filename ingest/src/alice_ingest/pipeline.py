@@ -363,6 +363,16 @@ def build_mon_jdls_resource(pg_url: str, env: Mapping[str, str] | None = None):
         write_disposition={"disposition": "merge", "strategy": "upsert"},
         schema_contract={"columns": "evolve", "data_type": "freeze"},
         table_format="iceberg",
+        # full_jdl_raw is parse_jdl's never-drop-a-row audit column: it only
+        # materializes on rows whose JDL FAILS to parse. The dress-rehearsal
+        # production window parsed 146,896/146,896, the column never
+        # evolved, and the contract view's DDL became un-appliable
+        # (subtractive drift, research/2026-07-13_production-data-dress-
+        # rehearsal.md). Declaring it here makes the audit surface exist
+        # deterministically, corrupt rows present or not -- the same
+        # deterministic-schema principle as jdl.py's value canonicalization.
+        # (jdl_parse_ok needs no hint: parse_jdl sets it on EVERY record.)
+        columns={"full_jdl_raw": {"data_type": "text", "nullable": True}},
     )
     resource.max_table_nesting = 1
     return resource

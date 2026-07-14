@@ -391,3 +391,28 @@ class TestTrinoMaintenanceAndFreshnessCommandsWiring:
 
         assert exit_code == 0
         assert captured["env"] == {"TRINO_URI": "x"}
+
+
+class TestBuildMonJdlsResourceDeclaresAuditColumns:
+    """full_jdl_raw only materializes on rows whose JDL fails to parse --
+    the dress-rehearsal's production window parsed 146,896/146,896, so the
+    column never evolved and the contract view's DDL (which SELECTs the
+    passthrough column) became un-appliable: subtractive drift, caught by
+    the new gate (research/2026-07-13_production-data-dress-rehearsal.md).
+    The audit column's EXISTENCE must not depend on whether a given window
+    happened to contain a corrupt JDL: declare it as an explicit column
+    hint so dlt creates it deterministically, corrupt rows or not -- the
+    same deterministic-schema principle as jdl.py's value canonicalization.
+    (jdl_parse_ok needs no hint: parse_jdl sets it on EVERY record.)"""
+
+    def test_declares_full_jdl_raw_as_nullable_text(self, monkeypatch):
+        from alice_ingest import pipeline as pipeline_module
+
+        fake_resource = FakeSqlTableResource()
+        monkeypatch.setattr(pipeline_module, "sql_table", lambda **kwargs: fake_resource)
+
+        pipeline_module.build_mon_jdls_resource("postgresql://fake/db", env={})
+
+        columns = fake_resource.hints["columns"]
+        assert columns["full_jdl_raw"]["data_type"] == "text"
+        assert columns["full_jdl_raw"]["nullable"] is True
