@@ -18,9 +18,12 @@ LIVE schema -- brief, Step 2):
    keys (`job_id` + 66 named JDL fields) -- the research doc's "~70 cols" was
    an approximation of this exact count.
 
-2. The LIVE dlt-produced schema: `SHOW COLUMNS FROM lake.alice.<table>` run
-   against this kind cluster 2026-07-12 (Trino 476 / Lakekeeper 0.12.2, after
-   `hack/seed-fixture.sh` + `hack/run-ingest-once.sh`):
+2. The LIVE dlt-produced schema. REGENERATED against REAL PRODUCTION DATA
+   by the 2026-07-13 production-data dress rehearsal (research/2026-07-13_
+   production-data-dress-rehearsal.md): `SHOW COLUMNS FROM lake.alice.
+   <table>` after ingesting a 166,019-job / 146,896-JDL production sample
+   (job_id window 3593645502..3593845502, 43 lpmjobtypeid values) on this
+   kind cluster (Trino 476 / Lakekeeper 0.12.2):
      job_info (7): job_id, jdl_set, trace_set, status, job_submit_timestamp,
        last_update, site -- IDENTICAL spelling to the dtypes contract (both
        tables "predate dlt renaming", per the plan: no dlt naming-convention
@@ -32,30 +35,33 @@ LIVE schema -- brief, Step 2):
        requestedttl, runningtimestamp, savingtimestamp, startedtimestamp,
        walltime, maxvirt, site, laststatuschangetimestamp -- IDENTICAL to the
        dtypes contract too, same reasoning.
-     mon_jdls_parsed (19): job_id, lpmjobtypeid, full_jdl, jdl_parse_ok,
-       jdl__pwg, jdl__ttl, jdl__user, jdl__job_tag, jdl__cpu_cores,
-       jdl__cpu_limit, jdl__packages, jdl__executable, jdl__memory_size,
-       jdl__requirements, jdl__collision_system, jdl__lpm_pass_name,
-       _dlt_load_id, _dlt_id, full_jdl_raw -- ONLY 12 of the 66 JDL-derived
-       contract fields have a live `jdl__*` counterpart. This is the kind
-       fixture's JDL sample data being narrower than the full production JDL
-       vocabulary (`ingest/tests/fixtures/jdl_samples.json`), not a mapping
-       bug -- production JDLs are expected to populate more of the 66 over
-       time as dlt's schema evolves (`schema_contract={"columns": "evolve",
-       ...}`, pipeline.py). The 54 contract fields with no live counterpart
-       are rendered as typed NULLs (see MON_JDLS_PARSED_NULL_TYPE below), NOT
-       omitted -- the view's column set matches the FULL contract regardless
-       of which fields today's fixture happens to populate.
+     mon_jdls_parsed (108): job_id, lpmjobtypeid, full_jdl, jdl_parse_ok,
+       _dlt_load_id, _dlt_id, and 102 `jdl__*` columns -- EVERY ONE varchar
+       (jdl.py's value canonicalization, a dress-rehearsal fix: values are
+       served as strings by construction, so the column set equals the
+       production JDL field-name vocabulary and never depends on value
+       types or row order). 64 of the 66 JDL-derived contract fields have
+       a live `jdl__*` counterpart in this window; the remaining 2
+       (`HardBins`, `MasterResubmitThreshold`) appeared in none of the
+       146,896 sampled JDLs and are rendered as typed NULLs (see
+       MON_JDLS_PARSED_NULL_TYPE below), NOT omitted -- the view's column
+       set matches the FULL contract regardless. The other 38 live
+       `jdl__*` columns are real production fields OUTSIDE the contract,
+       served via MON_JDLS_PARSED_PASSTHROUGH (see below). (full_jdl_raw
+       was absent from this window's live schema -- all JDLs parsed -- and
+       is hint-declared in pipeline.py since; see the passthrough comment.)
 
 dlt's naming convention (which contract field -> which `jdl__*` column) was
 NOT hand-simulated: verified by running the actual pinned dependency,
 `dlt.common.normalizers.naming.snake_case.NamingConvention().normalize_identifier()`,
-against all 66 JDL field names in a throwaway venv (dlt==1.28.2, matching
-`ingest/pyproject.toml`'s pin), 2026-07-12. Every one of the 12 live
-`jdl__*` columns matches its contract field's normalized form exactly (e.g.
-`CPUCores` -> `cpu_cores`, `LPMPassName` -> `lpm_pass_name`), confirming both
-directions: the fixture's populated fields are exactly this set of 12, and
-dlt's transform is exactly the invertible one this module assumes.
+against all 66 JDL field names (dlt==1.28.2, matching `ingest/
+pyproject.toml`'s pin) -- first on 2026-07-12 for the fixture-era 12, then
+re-run 2026-07-13 against the full 103-field production census (102 after
+the LPM merge). Every live `jdl__*` column matches its field's normalized
+form exactly (e.g. `CPUCores` -> `cpu_cores`, `O2DPG_ASYNC_RECO_TAG` ->
+`o2_dpg_async_reco_tag`), with ZERO normalization collisions across the
+production vocabulary, confirming dlt's transform is exactly the
+invertible one this module assumes.
 
 LPM casing (brief invariant, design spec section 4): gen-1 JDLs carried BOTH
 `LPMPassName` and `LPMPASSNAME` as case-variant duplicate keys; the upstream
@@ -64,33 +70,41 @@ dtypes.json still literally lists the split-casing spelling `LPMPASSNAME`
 coalesces both into the canonical `LPMPassName` BEFORE dlt ever sees the
 record (verified: `jdl__lpm_pass_name` exists live, `jdl__lpmpassname` does
 NOT -- kind-verify.sh's existing iceberg-contents-probe hard-gates this).
+PROVEN AT SCALE on real data by the dress rehearsal: 36,217 sampled JDLs
+carried the canonical casing and 13,243 the legacy one (the `33022`
+MC-production JDL family); live `jdl__lpm_pass_name` is populated in
+exactly 49,460 = 36,217 + 13,243 rows, and `jdl__lpmpassname` never
+appeared.
 This module therefore maps the CANONICAL key `LPMPassName` (not the raw
 dtypes.json's `LPMPASSNAME`) to `jdl__lpm_pass_name` -- per the brief's own
 worked example (`jdl__lpm_pass_name -> LPMPassName`) and per Step 2's
 explicit invariant ("`jdl__lpmpassname` must NOT appear").
 
-Packages: `Packages` (contract) -> `jdl__packages` (live). Physically a
-`varchar` column in Trino's Iceberg-connector view (Iceberg has no native
-JSON type), but dlt's OWN schema records its `data_type` as `"json"`
-(verified live, `ingest/tests/test_pipeline.py`'s
-`TestMaxTableNestingSuppressesChildTables` -- `max_table_nesting=1` demotes
-the JDL's `Packages` list field to a JSON-serialized value column instead of
-a child table). The view maps it as an ordinary passthrough column (no
-special CAST) -- the consumer already expects to receive+parse a JSON string
-under this field (dtypes.json declares it pandas `"object"` dtype, matching
-a string column).
+Packages: `Packages` (contract) -> `jdl__packages` (live varchar). Since
+the dress rehearsal, `jdl.py`'s value canonicalization serializes list
+values (like Packages) to compact JSON text at parse time, so the column
+is a plain string end-to-end (pre-rehearsal, `max_table_nesting=1` demoted
+it to a dlt `"json"`-typed value column instead -- `ingest/tests/
+test_pipeline.py`'s `TestMaxTableNestingSuppressesChildTables` documents
+that dlt mechanism, which remains load-bearing for flattening the `jdl`
+dict itself). The view maps it as an ordinary column (no special CAST) --
+the consumer already expects to receive+parse a JSON string under this
+field (dtypes.json declares it pandas `"object"` dtype, matching a string
+column).
 
 Typed-NULL type choice (MON_JDLS_PARSED_NULL_TYPE): the dtypes.json declares
 mixed pandas dtypes per field (`float64`, `object`, `bool`) -- but EVERY ONE
-of the 12 live `jdl__*` columns is `varchar` (JDL is a text-based classad
-format; dlt/parse_jdl never casts values, so even numeric-looking fields
-like `TTL`/`CPUCores` land as strings). VARCHAR is therefore the type that
-is actually consistent with this table's real, live sibling columns; casting
-the 54 absent fields' NULLs to their nominal pandas dtype would be a
-type-consistency lie this module has no live evidence for. The ML consumer's
-own `data_loader.py` already owns dtype casting against the contract
-(research/2026-07-12_ml-consumer-data-contract.md) -- that responsibility is
-not duplicated here.
+of the 102 live `jdl__*` columns is `varchar`, BY CONSTRUCTION since the
+dress rehearsal (jdl.py's `_canonicalize_values`: strings pass through,
+everything else becomes compact JSON text -- real production JDLs mix JSON
+types for the same field across rows, which otherwise forces dlt variant
+columns against the frozen data-type contract). VARCHAR is therefore the
+type that is actually consistent with this table's real, live sibling
+columns; casting the 2 absent fields' NULLs to their nominal pandas dtype
+would be a type-consistency lie this module has no live evidence for. The
+ML consumer's own `data_loader.py` already owns dtype casting against the
+contract (research/2026-07-12_ml-consumer-data-contract.md) -- that
+responsibility is not duplicated here.
 
 How to regenerate this mapping
 --------------------------------------------------------------------------
@@ -157,9 +171,10 @@ When either WARNING appears, regenerate this file:
      cluster runs the pinned image, not this working tree.)
   6. Update this module's test companion, `ingest/tests/test_views.py`'s
      `TestContractColumnsInvariants` (mapped/nulled counts, any new
-     column-specific invariant) -- the counts in this docstring (`13
-     mapped`, `54 NULLed`) and in those tests will both be stale after any
-     regeneration and must move together.
+     column-specific invariant) -- the counts in this docstring (currently
+     `65 mapped` incl. job_id, `2 NULLed`, `44 passthrough`) and in those
+     tests will both be stale after any regeneration and must move
+     together.
 """
 
 from __future__ import annotations
@@ -211,82 +226,87 @@ TRACE_PASSTHROUGH: tuple[str, ...] = ()
 # with `LPMPASSNAME` renamed to its canonical spelling `LPMPassName` (module
 # docstring, "LPM casing"). A `None` value means: no live `jdl__*` column
 # exists for this contract field today -- rendered as a typed NULL by
-# views.py, using MON_JDLS_PARSED_NULL_TYPE.
+# views.py, using MON_JDLS_PARSED_NULL_TYPE. Values REGENERATED against the
+# 2026-07-13 production sample (module docstring, source 2): 64 of 66
+# fields live (was 12 fixture-era); only `HardBins` and
+# `MasterResubmitThreshold` remain NULL (absent from all 146,896 sampled
+# production JDLs).
 # --------------------------------------------------------------------------
 MON_JDLS_PARSED_COLUMNS: dict[str, str | None] = {
     "job_id": "job_id",
-    "Activity": None,
-    "Arguments": None,
+    "Activity": "jdl__activity",
+    "Arguments": "jdl__arguments",
     "CPUCores": "jdl__cpu_cores",
     "CPULimit": "jdl__cpu_limit",
     "CollisionSystem": "jdl__collision_system",
-    "DataframeSize": None,
-    "DirectAccess": None,
+    "DataframeSize": "jdl__dataframe_size",
+    "DirectAccess": "jdl__direct_access",
     "Executable": "jdl__executable",
-    "FilesToCheck": None,
-    "HYJobID": None,
-    "HYRun": None,
-    "HYTrain": None,
+    "FilesToCheck": "jdl__files_to_check",
+    "HYJobID": "jdl__hy_job_id",
+    "HYRun": "jdl__hy_run",
+    "HYTrain": "jdl__hy_train",
     "HardBins": None,
-    "InputData": None,
-    "InputDataList": None,
-    "InputDataListFormat": None,
-    "InputDataType": None,
-    "InputFile": None,
-    "IterationTimestamp": None,
-    "JDLArguments": None,
-    "JDLPath": None,
-    "JDLProcessor": None,
-    "JDLVariables": None,
+    "InputData": "jdl__input_data",
+    "InputDataList": "jdl__input_data_list",
+    "InputDataListFormat": "jdl__input_data_list_format",
+    "InputDataType": "jdl__input_data_type",
+    "InputFile": "jdl__input_file",
+    "IterationTimestamp": "jdl__iteration_timestamp",
+    "JDLArguments": "jdl__jdl_arguments",
+    "JDLPath": "jdl__jdl_path",
+    "JDLProcessor": "jdl__jdl_processor",
+    "JDLVariables": "jdl__jdl_variables",
     "JobTag": "jdl__job_tag",
-    "LPMActivity": None,
-    "LPMAnchorPassName": None,
-    "LPMAnchorProduction": None,
-    "LPMAnchorRun": None,
-    "LPMAnchorYear": None,
-    "LPMChainID": None,
-    "LPMCollectionEntity": None,
-    "LPMHighPriority": None,
-    "LPMInteractionType": None,
-    "LPMJobTypeID": None,
-    "LPMMaxResubmissions": None,
-    "LPMMetaData": None,
-    "LPMParentPID": None,
-    "LPMProductionTag": None,
-    "LPMProductionType": None,
-    "LPMRunNumber": None,
-    "LegoResubmitZombies": None,
-    "MCAnchor": None,
-    "MasterJobID": None,
+    "LPMActivity": "jdl__lpm_activity",
+    "LPMAnchorPassName": "jdl__lpm_anchor_pass_name",
+    "LPMAnchorProduction": "jdl__lpm_anchor_production",
+    "LPMAnchorRun": "jdl__lpm_anchor_run",
+    "LPMAnchorYear": "jdl__lpm_anchor_year",
+    "LPMChainID": "jdl__lpm_chain_id",
+    "LPMCollectionEntity": "jdl__lpm_collection_entity",
+    "LPMHighPriority": "jdl__lpm_high_priority",
+    "LPMInteractionType": "jdl__lpm_interaction_type",
+    "LPMJobTypeID": "jdl__lpm_job_type_id",
+    "LPMMaxResubmissions": "jdl__lpm_max_resubmissions",
+    "LPMMetaData": "jdl__lpm_meta_data",
+    "LPMParentPID": "jdl__lpm_parent_pid",
+    "LPMProductionTag": "jdl__lpm_production_tag",
+    "LPMProductionType": "jdl__lpm_production_type",
+    "LPMRunNumber": "jdl__lpm_run_number",
+    "LegoResubmitZombies": "jdl__lego_resubmit_zombies",
+    "MCAnchor": "jdl__mc_anchor",
+    "MasterJobID": "jdl__master_job_id",
     "MasterResubmitThreshold": None,
-    "MaxFailFraction": None,
-    "MaxOutputSize": None,
-    "MaxResubmitFraction": None,
-    "MaxWaitingTime": None,
+    "MaxFailFraction": "jdl__max_fail_fraction",
+    "MaxOutputSize": "jdl__max_output_size",
+    "MaxResubmitFraction": "jdl__max_resubmit_fraction",
+    "MaxWaitingTime": "jdl__max_waiting_time",
     "MemorySize": "jdl__memory_size",
-    "OrigRequirements": None,
-    "Output": None,
-    "OutputDir": None,
-    "OutputErrorE": None,
-    "OutputFileType": None,
+    "OrigRequirements": "jdl__orig_requirements",
+    "Output": "jdl__output",
+    "OutputDir": "jdl__output_dir",
+    "OutputErrorE": "jdl__output_error_e",
+    "OutputFileType": "jdl__output_file_type",
     "PWG": "jdl__pwg",
     "Packages": "jdl__packages",
-    "Price": None,
+    "Price": "jdl__price",
     "Requirements": "jdl__requirements",
-    "SeNumber": None,
-    "Splitted": None,
+    "SeNumber": "jdl__se_number",
+    "Splitted": "jdl__splitted",
     "TTL": "jdl__ttl",
-    "Type": None,
+    "Type": "jdl__type",
     "User": "jdl__user",
-    "ValidationCommand": None,
-    "WorkDirectorySize": None,
+    "ValidationCommand": "jdl__validation_command",
+    "WorkDirectorySize": "jdl__work_directory_size",
     # Canonical spelling (module docstring, "LPM casing") -- NOT the upstream
     # dtypes.json's literal (legacy) key `LPMPASSNAME`.
     "LPMPassName": "jdl__lpm_pass_name",
 }
 
-# All 54 currently-NULLed fields share this type (module docstring, "Typed-
-# NULL type choice").
+# Both currently-NULLed fields (`HardBins`, `MasterResubmitThreshold` --
+# absent from the rehearsal window's 146,896 real JDLs) share this type
+# (module docstring, "Typed-NULL type choice").
 MON_JDLS_PARSED_NULL_TYPE = "VARCHAR"
 
 # Live dlt columns with NO contract counterpart at all -- passed straight
@@ -295,8 +315,22 @@ MON_JDLS_PARSED_NULL_TYPE = "VARCHAR"
 # table/pipeline artifacts (production ground truth: mon_jdls's own 3
 # PostgreSQL columns are job_id/lpmjobtypeid/full_jdl -- see pipeline.py's
 # module docstring); `jdl_parse_ok`/`full_jdl_raw` are `parse_jdl`'s own
-# bookkeeping (jdl.py); `_dlt_load_id`/`_dlt_id` are dlt's own metadata
-# columns. None of these six appear in the ML consumer's dtypes contract.
+# bookkeeping (jdl.py; full_jdl_raw is hint-declared in pipeline.py since
+# the dress rehearsal, so it exists even when every JDL parses); `_dlt_
+# load_id`/`_dlt_id` are dlt's own metadata columns. None of these appear
+# in the ML consumer's dtypes contract.
+#
+# The `jdl__*` entries below are REAL production JDL fields outside the
+# 66-key dtypes contract, discovered by the 2026-07-13 dress rehearsal's
+# 146,896-JDL sample (each matched against dlt's real normalizer per
+# regeneration step 3 -- none corresponds to any contract field). They are
+# served under their dlt names so the data stays reachable without
+# pretending it belongs to the consumer contract. Notable: the ALL-CAPS
+# O2/QC calibration flags (jdl__addtimeseriesinmc ... jdl__usethrottling)
+# come from MC-production and a 2-job QC-special; the jdl__lpm_pass /
+# jdl__lpm_raw_pass / jdl__lpmc_pass_mode / jdl__lpmraw_pass_id family are
+# LPM fields the contract simply never included (distinct from
+# LPMPassName, which IS contract-mapped above).
 MON_JDLS_PARSED_PASSTHROUGH: tuple[str, ...] = (
     "lpmjobtypeid",
     "full_jdl",
@@ -304,4 +338,42 @@ MON_JDLS_PARSED_PASSTHROUGH: tuple[str, ...] = (
     "full_jdl_raw",
     "_dlt_load_id",
     "_dlt_id",
+    "jdl__addtimeseriesinmc",
+    "jdl__anchor_sim_options",
+    "jdl__aodfilesize",
+    "jdl__doemccalib",
+    "jdl__dotpcresidualextraction",
+    "jdl__dplreportprocessing",
+    "jdl__enablemonitoring",
+    "jdl__enablepermilfulltrackqc",
+    "jdl__enableunbinnedtimeseries",
+    "jdl__estimated_throughput",
+    "jdl__extracttimeseries",
+    "jdl__forced_kill_timeout",
+    "jdl__hy_train_type",
+    "jdl__hyx_run_merge_id",
+    "jdl__initial_ttl",
+    "jdl__keep_logs",
+    "jdl__keeptofmatchoutput",
+    "jdl__lpm_anchored_pass_number",
+    "jdl__lpm_pass",
+    "jdl__lpm_production_cycle",
+    "jdl__lpm_raw_pass",
+    "jdl__lpmc_pass_mode",
+    "jdl__lpmraw_pass_id",
+    "jdl__merging_stage",
+    "jdl__nkeep",
+    "jdl__notfdelay",
+    "jdl__o2_dpg_async_reco_tag",
+    "jdl__proxy_ttl",
+    "jdl__run3_chunk",
+    "jdl__runanalysisqc",
+    "jdl__split_max_input_file_number",
+    "jdl__subjob_count",
+    "jdl__thinaods",
+    "jdl__tpcscalingsource",
+    "jdl__trackqcfraction",
+    "jdl__ttl_optimization_type",
+    "jdl__ttl_scaling",
+    "jdl__usethrottling",
 )

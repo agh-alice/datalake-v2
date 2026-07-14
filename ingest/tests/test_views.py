@@ -62,10 +62,17 @@ class TestContractColumnsInvariants:
         assert len(MON_JDLS_PARSED_COLUMNS) == 67
 
     def test_mon_jdls_parsed_mapped_vs_nulled_counts(self):
+        # Regenerated against the 2026-07-13 production sample (146,896 real
+        # JDLs, research/2026-07-13_production-data-dress-rehearsal.md):
+        # 64 of 66 JDL fields live (was 12 fixture-era).
         mapped = [v for v in MON_JDLS_PARSED_COLUMNS.values() if v is not None]
         nulled = [v for v in MON_JDLS_PARSED_COLUMNS.values() if v is None]
-        assert len(mapped) == 13  # job_id + 12 live jdl__* columns
-        assert len(nulled) == 54
+        assert len(mapped) == 65  # job_id + 64 live jdl__* columns
+        assert len(nulled) == 2
+
+    def test_still_nulled_fields_are_exactly_the_two_absent_from_production(self):
+        nulled = {k for k, v in MON_JDLS_PARSED_COLUMNS.items() if v is None}
+        assert nulled == {"HardBins", "MasterResubmitThreshold"}
 
     def test_lpm_pass_name_maps_from_the_merged_canonical_column(self):
         assert MON_JDLS_PARSED_COLUMNS["LPMPassName"] == "jdl__lpm_pass_name"
@@ -93,8 +100,12 @@ class TestContractColumnsInvariants:
         mapped = {v for v in MON_JDLS_PARSED_COLUMNS.values() if v is not None}
         assert mapped.isdisjoint(MON_JDLS_PARSED_PASSTHROUGH)
 
-    def test_passthrough_is_exactly_the_six_dlt_only_extras(self):
-        assert set(MON_JDLS_PARSED_PASSTHROUGH) == {
+    def test_passthrough_contains_the_six_dlt_only_extras_plus_production_fields(self):
+        # The six pipeline/dlt bookkeeping columns, plus the 38 real
+        # production JDL fields outside the 66-key dtypes contract found by
+        # the 2026-07-13 dress rehearsal (each verified against dlt's real
+        # normalizer to match NO contract field).
+        base = {
             "lpmjobtypeid",
             "full_jdl",
             "jdl_parse_ok",
@@ -102,6 +113,10 @@ class TestContractColumnsInvariants:
             "_dlt_load_id",
             "_dlt_id",
         }
+        assert base <= set(MON_JDLS_PARSED_PASSTHROUGH)
+        extras = set(MON_JDLS_PARSED_PASSTHROUGH) - base
+        assert len(extras) == 38
+        assert all(name.startswith("jdl__") for name in extras)
 
     def test_null_type_is_varchar_matching_every_live_sibling_column(self):
         assert MON_JDLS_PARSED_NULL_TYPE == "VARCHAR"
@@ -216,7 +231,12 @@ class TestBuildViewDdl:
 
         assert ddl.count(' AS "') == 67  # every contract column aliased to "ContractName"
         assert '"jdl__lpm_pass_name" AS "LPMPassName"' in ddl
-        assert 'CAST(NULL AS VARCHAR) AS "Activity"' in ddl
+        # Activity is contract-mapped since the 2026-07-13 production
+        # regeneration; the two fields absent from the production sample
+        # are the ones still rendered as typed NULLs.
+        assert '"jdl__activity" AS "Activity"' in ddl
+        assert 'CAST(NULL AS VARCHAR) AS "HardBins"' in ddl
+        assert 'CAST(NULL AS VARCHAR) AS "MasterResubmitThreshold"' in ddl
         assert '"_dlt_id"' in ddl
 
 
