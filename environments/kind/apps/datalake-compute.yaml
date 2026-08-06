@@ -1,6 +1,8 @@
 # Plan 5 Task 4 -- see datalake-storage.yaml's header comment for the
 # shared rationale (tier-mirroring Application, no CreateNamespace=true,
-# same reasons).
+# same reasons) and its destination.namespace comment (live finding:
+# Trino is a chart dependency too, Task 2 -- any of its upstream
+# templates that don't self-declare a namespace need this set correctly).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -20,6 +22,7 @@ spec:
       path: envs/prod/compute
   destination:
     server: https://kubernetes.default.svc
+    namespace: datalake-compute
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]

@@ -1,6 +1,10 @@
 # Plan 5 Task 4 -- see datalake-storage.yaml's header comment for the
 # shared rationale (tier-mirroring Application, no CreateNamespace=true,
-# same reasons).
+# same reasons) and its destination.namespace comment (this chart has no
+# dependencies today, all hand-authored templates self-declare their
+# namespace -- set anyway for consistency with the other two tiers and as
+# a forward guard against the same class of bug if a dependency is ever
+# added here).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -20,6 +24,7 @@ spec:
       path: envs/prod/orchestration
   destination:
     server: https://kubernetes.default.svc
+    namespace: datalake-orchestration
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]

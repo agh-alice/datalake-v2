@@ -12,6 +12,21 @@
 # pre-create all three `datalake-*` namespaces itself, before this
 # Application's first sync (same reasoning as that script's existing
 # lakekeeper/minio/dex/monitoring namespace pre-creation).
+#
+# destination.namespace IS set (live finding, Task 4 clean-room): every
+# hand-authored template in this chart hardcodes its own `metadata.
+# namespace: datalake-storage` (Task 1's convention), so it didn't matter
+# for the old single-umbrella Application -- but Lakekeeper is now a
+# chart DEPENDENCY (Task 2), and its upstream templates rely on normal
+# Helm release-namespace semantics for objects that don't self-declare
+# one (e.g. templates/db-migration.yaml's Job). With destination.namespace
+# left unset, ArgoCD's hydrator rendered that Job into namespace `argocd`
+# (this Application's OWN namespace) instead of `datalake-storage` --
+# reproduced live: `kubectl -n argocd get application datalake-storage`
+# tracked `lakekeeper-db-migration-1` as a resource in namespace `argocd`
+# with `requiresPruning: true`. Explicit destination.namespace is what
+# Helm's `--namespace`/`.Release.Namespace` actually resolves to at
+# render time.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -31,6 +46,7 @@ spec:
       path: envs/prod/storage
   destination:
     server: https://kubernetes.default.svc
+    namespace: datalake-storage
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]
