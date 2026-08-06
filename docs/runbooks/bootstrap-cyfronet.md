@@ -186,9 +186,9 @@ from the tenant cluster's own object state and from GitHub.
   `datalake.agh.edu.pl/role=database` (§5, the missing-taint workaround) —
   if that label ever moves to different nodes without updating the chart,
   the coordinator has nowhere to schedule.
-- **Trino serves `landing`/`system`/`tpch`/`tpcds` but no `lake` catalog:**
-  expected, not a bug, until G2 (S3 credentials, §5) lands — the `lake`
-  catalog only exists once `values-lake.yaml` is layered on top of
+- **Trino serves `landing` (+ Trino's built-in `system`) but no `lake`
+  catalog:** expected, not a bug, until G2 (S3 credentials, §5) lands — the
+  `lake` catalog only exists once `values-lake.yaml` is layered on top of
   `values.yaml` (`envs/prod/compute/values.yaml`'s Decision 2 comment: a
   Trino that's honestly missing one catalog is safer than one serving a
   catalog pointed at placeholder S3 values that would fail every query).

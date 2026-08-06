@@ -18,6 +18,23 @@
 #     never renders it, so it needs its own pass to actually prove the
 #     state prod will run once G2 lands is seam-clean too.
 #
+# Every render below passes `-f <chart-dir>/values.yaml` explicitly, even
+# for the plain no-suffix case -- deliberately, not redundant with Helm's
+# own auto-load of the chart's values.yaml. Live-verified (2026-08-06,
+# review finding): `helm template envs/prod/compute` with NO -f at all
+# renders Trino's default `tpch`/`tpcds` demo catalogs (the chart's own
+# defaults, un-nulled); `helm template envs/prod/compute -f
+# envs/prod/compute/values.yaml` -- same file, passed explicitly -- deletes
+# them, because Helm's dependency-values null-key coalescing (helm/helm#9027
+# territory) behaves differently for values supplied via an explicit -f than
+# for the chart's own auto-loaded default. Every real render this repo's
+# Applications produce (kind's `sourceHydrator.drySource.helm.valueFiles`,
+# and prod's once it exists) passes an explicit valueFiles list -- never a
+# bare `helm template <chart>` -- so a bare render here would validate a
+# state nothing ever deploys. tpch/tpcds are harmless namespaced ConfigMap
+# entries either way (not a seam violation in either render shape), but the
+# principle applies regardless of what's at stake this time.
+#
 # Plain grep, deliberately -- the task brief's own Step 4 says "grep the
 # rendered output for cluster-scoped kinds"; a `kind:` line is always a
 # top-level (column-0) mapping key in a valid Kubernetes manifest, so an
@@ -49,10 +66,10 @@ fail=0
 for arg in "$@"; do
   chart_dir="${arg%%:*}"
   extra_values=""
-  helm_args=(template "$chart_dir" --include-crds)
+  helm_args=(template "$chart_dir" -f "$chart_dir/values.yaml" --include-crds)
   if [ "$arg" != "$chart_dir" ]; then
     extra_values="${arg#*:}"
-    helm_args=(template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/$extra_values" --include-crds)
+    helm_args+=(-f "$chart_dir/$extra_values")
   fi
   echo "== seam gate: $chart_dir${extra_values:+ (+ $extra_values)} =="
   rendered="$(helm "${helm_args[@]}")"
