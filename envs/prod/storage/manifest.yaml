@@ -258,7 +258,7 @@ spec:
   affinity:
     nodeSelector:
       pool: db
-    tolerations: []
+    tolerations: null
   bootstrap:
     initdb:
       database: lakekeeper
@@ -284,7 +284,7 @@ spec:
   affinity:
     nodeSelector:
       pool: db
-    tolerations: []
+    tolerations: null
   bootstrap:
     initdb:
       database: mon_data
