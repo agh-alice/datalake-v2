@@ -27,6 +27,12 @@
 # only"): adding `release: monitoring` (Global Constraint, Task 3 Step 5
 # explicitly owns it) and resource requests on the CronWorkflow containers
 # these alerts watch (Task 3 Step 3).
+#
+# Plan 5 Task 1 review fix: the platform's Prometheus was inspected
+# 2026-08-05 -- `ruleSelector: {matchLabels: {release: monitoring}}`,
+# `ruleNamespaceSelector: {}` (empty = all namespaces). Adoption of any
+# PrometheusRule here therefore depends ONLY on the `release: monitoring`
+# label (Task 3 Step 5 adds it), not on namespace placement.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

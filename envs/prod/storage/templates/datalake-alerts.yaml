@@ -14,6 +14,12 @@
 # NOT done here (Plan 5 Task 3's job, not Task 1's -- "structural split
 # only"): adding `release: monitoring` (Global Constraint, Task 3 Step 5
 # explicitly owns it).
+#
+# Plan 5 Task 1 review fix: the platform's Prometheus was inspected
+# 2026-08-05 -- `ruleSelector: {matchLabels: {release: monitoring}}`,
+# `ruleNamespaceSelector: {}` (empty = all namespaces). Adoption of any
+# PrometheusRule here therefore depends ONLY on the `release: monitoring`
+# label (Task 3 Step 5 adds it), not on namespace placement.
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -23,11 +29,25 @@ spec:
   groups:
     - name: datalake
       rules:
+        # Plan 5 Task 1 review fix: this expr carried no selector at all --
+        # written when we owned the whole cluster. On the shared platform
+        # cluster, bare `cnpg_pg_database_xid_age` matches every tenant's
+        # CNPG database, not just ours. Scoped to mon-data specifically,
+        # same job-label shape already verified live for
+        # cnpg_pg_replication_streaming_replicas below (`job` =
+        # "<namespace>/<cluster>", the CNPG Prometheus exporter's
+        # convention across its cnpg_pg_* metric family) -- not
+        # independently re-verified live for xid_age itself, flagging that
+        # alongside the same live-reverify follow-up already noted below.
+        # `by (namespace, job)` + the static `cluster` label mirror the
+        # CNPGClusterUnhealthy treatment for consistency, though this alert
+        # has no identity-collision partner of its own.
         - alert: LandingDBXidAgeHigh
-          expr: max(cnpg_pg_database_xid_age) > 1000000000
+          expr: max by (namespace, job) (cnpg_pg_database_xid_age{namespace="datalake-storage", job="datalake-storage/mon-data"}) > 1000000000
           for: 30m
           labels:
             severity: critical
+            cluster: mon-data
           annotations:
             summary: Landing DB transaction-ID age approaching wraparound
             description: >-
@@ -71,12 +91,26 @@ spec:
         # re-verified live against the prod tenant cluster (no cluster
         # access from this task); flagging that as a Task 3 (monitoring
         # integration) follow-up check once PrometheusRules actually sync.
+        #
+        # Plan 5 Task 1 review fix (alert-identity collision): the `job`
+        # selector above fixes which series each expr READS, but
+        # `max by (namespace)` was stripping `job` back out of the RESULT
+        # vector -- both alerts therefore rendered with the identical final
+        # label set {alertname, namespace="datalake-storage",
+        # severity="critical"}, so Alertmanager grouped/deduped them as one
+        # alert and which summary won was unspecified. Fixed two ways: (1)
+        # aggregate `by (namespace, job)` instead of `by (namespace)` alone
+        # so `job` survives into the alert's own label set; (2) add a
+        # static `cluster` label (`mon-data` / `lakekeeper-db`) so a human
+        # reading the alert in Slack doesn't have to parse a job string to
+        # know which database degraded. Selectors themselves are unchanged.
         {{- if gt (int .Values.landingDb.instances) 1 }}
         - alert: CNPGClusterUnhealthy
-          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/mon-data"}) < {{ sub (int .Values.landingDb.instances) 1 }}
+          expr: max by (namespace, job) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/mon-data"}) < {{ sub (int .Values.landingDb.instances) 1 }}
           for: 15m
           labels:
             severity: critical
+            cluster: mon-data
           annotations:
             summary: CNPG cluster mon-data has fewer streaming replicas than expected
             description: >-
@@ -89,10 +123,11 @@ spec:
         {{- end }}
         {{- if gt (int .Values.lakekeeperDb.instances) 1 }}
         - alert: CNPGClusterUnhealthy
-          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/lakekeeper-db"}) < {{ sub (int .Values.lakekeeperDb.instances) 1 }}
+          expr: max by (namespace, job) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/lakekeeper-db"}) < {{ sub (int .Values.lakekeeperDb.instances) 1 }}
           for: 15m
           labels:
             severity: critical
+            cluster: lakekeeper-db
           annotations:
             summary: CNPG cluster lakekeeper-db has fewer streaming replicas than expected
             description: >-
@@ -104,41 +139,27 @@ spec:
             incident: E5
         {{- end }}
 
-        - alert: NodeDiskPressure
-          expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.2
-          for: 30m
-          labels:
-            severity: warning
-          annotations:
-            summary: Node filesystem below 20% free
-            description: >-
-              A node filesystem has had less than 20% free space for 30m.
-              E5 included a root disk left 100% full by one unrotated
-              27GB Docker log, unnoticed until someone asked where the
-              data was.
-            incident: E5
+        # Plan 5 Task 1 review fix: NodeDiskPressure deleted. As written
+        # (`node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} /
+        # node_filesystem_size_bytes`) it carried no selector at all --
+        # written when we owned the whole cluster. On the shared platform
+        # cluster it would watch EVERY node's EVERY filesystem, including
+        # nodes and tenants we don't own. Considered scoping it to our own
+        # node pools instead (labels exist: pool=db, pool=avx2,
+        # cpu=x86-64-v3) but rejected that in favor of deletion: node-level
+        # disk health is the platform's operational responsibility on a
+        # shared cluster, not a tenant's -- we don't own node remediation,
+        # so paging ourselves about a platform node we cannot act on is
+        # noise, not signal. E5 (the incident this alert traced to -- a
+        # root disk filled by an unrotated Docker log) was a Gen-1
+        # single-tenant-VM failure mode; the platform's own node-level
+        # monitoring is the appropriate owner of its shared-cluster
+        # equivalent now.
 
-        # Plan 5 Task 1 finding, not silently dropped: this alert's data
-        # source is the ServiceMonitor deleted in this same task
-        # (chart/templates/argocd-servicemonitor.yaml -- ArgoCD is
-        # hub-side now, "platform owns namespaces; ArgoCD is hub-side" per
-        # the Task 1 brief). Nothing in this repo scrapes argocd_app_info
-        # any more, so this rule has no series to evaluate against once it
-        # syncs to the prod tenant cluster -- it will not fire, silently,
-        # rather than error. Left in place (moving templates, not pruning
-        # alert content, is this task's scope) since Task 3 Step 5
-        # ("delete anything that assumed we own Prometheus") is explicitly
-        # where this belongs; flagging here so it isn't lost.
-        - alert: ArgoAppOutOfSync
-          expr: argocd_app_info{sync_status!="Synced"} == 1
-          for: 1h
-          labels:
-            severity: warning
-          annotations:
-            summary: ArgoCD Application out of sync for over an hour
-            description: >-
-              argocd_app_info reports sync_status != Synced for 1h -- the
-              live cluster no longer matches the tracked Git source. E2 was
-              exactly this class of silent drift: a Dec-2023 image running
-              in production instead of the repo's code.
-            incident: E2
+        # Plan 5 Task 1 review fix: ArgoAppOutOfSync deleted (resolving the
+        # prior two-branched finding above rather than re-litigating it).
+        # Our Argo CD Applications live on the hub cluster, not this one;
+        # this platform's Prometheus runs on the tenant cluster and does
+        # not scrape the hub, so argocd_app_info will never exist here.
+        # Application sync health is hub-side and therefore the platform's
+        # to monitor, not ours.
