@@ -1,7 +1,7 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "182500faa7f03d064f107950a1e8c99f8fa3f943",
+  "drySha": "5e6caaa7c0706db3ab8d17f5c4643100e08b4438",
   "commands": [
-    "helm template . --name-template datalake-compute --values ./envs/prod/compute/values.yaml --values ./envs/prod/compute/values-kind.yaml --include-crds"
+    "helm template . --name-template datalake-compute --namespace datalake-compute --values ./envs/prod/compute/values.yaml --values ./envs/prod/compute/values-kind.yaml --include-crds"
   ]
 }

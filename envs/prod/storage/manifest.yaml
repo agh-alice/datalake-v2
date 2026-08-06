@@ -11,7 +11,7 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper
-  namespace: argocd
+  namespace: datalake-storage
 ---
 apiVersion: v1
 data:
@@ -32,7 +32,7 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper-config-envs
-  namespace: argocd
+  namespace: datalake-storage
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -46,7 +46,7 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper
-  namespace: argocd
+  namespace: datalake-storage
 rules:
   - apiGroups:
       - batch
@@ -69,7 +69,7 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper-rolebinding
-  namespace: argocd
+  namespace: datalake-storage
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -77,7 +77,7 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: lakekeeper
-    namespace: argocd
+    namespace: datalake-storage
 ---
 apiVersion: v1
 kind: Service
@@ -91,7 +91,7 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper
-  namespace: argocd
+  namespace: datalake-storage
 spec:
   ports:
     - name: http
@@ -117,7 +117,7 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper
-  namespace: argocd
+  namespace: datalake-storage
 spec:
   replicas: 1
   selector:
@@ -133,7 +133,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/secret-config-envs: 689a54bec622cff9c632c7003ab7ca7f72c031d0f6f8fec71f5f0285d523fc0e
+        checksum/secret-config-envs: 949a2111b3a0f1b4e48f54daacb91e90b634a7d15b79e815dbc1dd4fdb5e0009
         cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
       labels:
         app.kubernetes.io/component: catalog
@@ -422,7 +422,7 @@ metadata:
     component: catalog
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper-test-bootstrap
-  namespace: argocd
+  namespace: datalake-storage
 spec:
   containers:
     - args:
@@ -479,12 +479,12 @@ metadata:
     app.kubernetes.io/version: 0.12.2
     helm.sh/chart: lakekeeper-0.11.0
   name: lakekeeper-db-migration-1
-  namespace: argocd
+  namespace: datalake-storage
 spec:
   template:
     metadata:
       annotations:
-        checksum/secret-config-envs: 689a54bec622cff9c632c7003ab7ca7f72c031d0f6f8fec71f5f0285d523fc0e
+        checksum/secret-config-envs: 949a2111b3a0f1b4e48f54daacb91e90b634a7d15b79e815dbc1dd4fdb5e0009
       labels:
         app.kubernetes.io/component: db-migration
         app.kubernetes.io/instance: datalake-storage
