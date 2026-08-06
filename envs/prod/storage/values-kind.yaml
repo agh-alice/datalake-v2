@@ -7,29 +7,49 @@
 # actually tested for real"). hack/kind-up.sh labels the kind worker node
 # `pool=db` -- this override makes both CNPG clusters actually schedule
 # via that real nodeSelector match instead of a values-neutralised no-op.
-# Tolerations are emptied deliberately, NOT copied from values.yaml's
+# Tolerations are `null`, NOT `[]` and NOT copied from values.yaml's
 # `dedicated=database:NoSchedule`: kind's single worker carries the LABEL
 # but not the TAINT (a 2-node kind cluster -- control-plane + one worker --
 # has nowhere else for the operators/compute/orchestration workloads to
 # run if that single worker were tainted; see task-4-report.md for the
-# full reasoning). A toleration for a taint that doesn't exist is a
-# harmless no-op either way, but stating `tolerations: []` here is more
-# honest about what's actually being tested on kind (nodeSelector, not the
-# taint).
+# full reasoning). `null`, not `[]`, is load-bearing here -- LIVE FINDING
+# (Task 4 clean-room): an explicit empty list renders `tolerations: []` in
+# the Cluster CR, a real non-nil empty slice server-side, which is NOT the
+# same as the field being absent -- CNPG's own reconciler compares the
+# LIVE pod's tolerations (every pod gets `node.kubernetes.io/{not-ready,
+# unreachable}:NoExecute` auto-injected by the API server's
+# DefaultTolerationSeconds admission plugin, tolerationSeconds: 300,
+# regardless of what the pod spec itself declared) against this "desired"
+# empty list, sees a permanent mismatch ("original and target PodSpec
+# differ in tolerations" -- kubectl -n cnpg-system logs deploy/
+# cloudnative-pg), and recreates the instance pod forever: the new pod
+# gets the same 2 admission-injected tolerations, the diff never
+# resolves. Reproduced live: both mon-data and lakekeeper-db stuck
+# "Waiting for the instances to become active" indefinitely with
+# `tolerations: []`, immediately reaching "Cluster in healthy state" once
+# patched to `tolerations: null` -- `null` unmarshals server-side to a nil
+# slice, indistinguishable from the key being omitted entirely, which is
+# what actually lets CNPG's own defaulting treat "no custom tolerations"
+# correctly instead of fighting the admission-injected ones.
 placement:
   nodeSelector:
     pool: db
-  tolerations: []
+  tolerations: null
 
 # Lakekeeper's catalog.nodeSelector/tolerations duplicate the
 # top-level `placement:` block by hand (values.yaml's own comment:
 # subchart values are plain data, not cross-referenceable) -- same
-# override, same reasoning as `placement:` above.
+# override, same reasoning as `placement:` above. This one is a plain
+# apps/v1 Deployment (+ a one-shot db-migration Job), not a CNPG Cluster,
+# so the live infinite-recreate-loop bug above does not actually apply to
+# it -- `null` kept here anyway for consistency with `placement:` and
+# because there is no upside to `[]` once its one real justification
+# (matching the CNPG live finding) is understood.
 lakekeeper:
   catalog:
     nodeSelector:
       pool: db
-    tolerations: []
+    tolerations: null
 
 # Restored (Task 4) from the pre-split chart/values-kind.yaml (git history:
 # commit 1466141^): a single small instance keeps kind's landing DB cheap.

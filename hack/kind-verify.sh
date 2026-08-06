@@ -556,20 +556,23 @@ spec:
           # Hard gate (Plan 5 Task 4 -- brief: relax from an exact set to
           # "lake and landing are present, AND nothing appears outside the
           # allowlist {lake, landing, system, tpch, tpcds}"). Reason
-          # (Task 2/3 review, relayed to Task 4): Helm cannot delete
-          # subchart values keys through the `dependencies:` path (a
-          # confirmed upstream limitation, helm/helm#9027 and friends) --
-          # UNLESS a second `-f` values file also touches a key under
-          # `trino:`, in which case the null-deletion DOES propagate
-          # (empirically confirmed by the reviewer against this exact
-          # chart+dependency shape). envs/prod/compute/values-kind.yaml
-          # necessarily touches `trino:` (image, coordinator, catalogs.lake)
-          # for its own unrelated reasons, so kind's actual rendered
-          # catalog set is expected to be {lake, landing, system} -- but
-          # this gate does not assume that outcome, it verifies the
-          # allowlist + required-pair shape either way (accepted, not
-          # fought: tpch/tpcds are synthetic connectors with no external
-          # I/O and no credentials, if they do appear).
+          # (Task 2/3 review, relayed to Task 4; NOTE: no backtick
+          # characters in this comment block, same reason as the note
+          # further down this same unquoted heredoc -- see that note):
+          # Helm cannot delete subchart values keys through the
+          # dependencies: path (a confirmed upstream limitation,
+          # helm/helm#9027 and friends) -- UNLESS a second -f values file
+          # also touches a key under trino:, in which case the
+          # null-deletion DOES propagate (empirically confirmed by the
+          # reviewer against this exact chart+dependency shape).
+          # envs/prod/compute/values-kind.yaml necessarily touches trino:
+          # (image, coordinator, catalogs.lake) for its own unrelated
+          # reasons, so kind's actual rendered catalog set is expected to
+          # be {lake, landing, system} -- but this gate does not assume
+          # that outcome, it verifies the allowlist + required-pair shape
+          # either way (accepted, not fought: tpch/tpcds are synthetic
+          # connectors with no external I/O and no credentials, if they do
+          # appear).
           ALLOWED_CATALOGS = {"lake", "landing", "system", "tpch", "tpcds"}
           REQUIRED_CATALOGS = {"lake", "landing"}
           catalog_rows = run_query("SHOW CATALOGS")

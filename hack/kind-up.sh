@@ -92,17 +92,44 @@ for ns in datalake-storage datalake-compute datalake-orchestration; do
 done
 
 # `platform` ClusterSecretStore (Plan 5 Task 4 -- brief: "same name as
-# production deliberately"). Guarded on the External Secrets Operator's
-# CRDs existing first (same "guarded poll before reading/applying a
-# dependent resource" pattern this script already uses for lakekeeper/CNPG
-# readiness below).
+# production deliberately"). Two live findings from the Task 4 clean-room,
+# both fixed by waiting on the external-secrets Application's own ArgoCD
+# health rather than a narrower proxy signal:
+#   1. `kubectl get crd` succeeding is NOT enough: a CRD object can exist
+#      while the API server's aggregated discovery document -- what
+#      `kubectl apply` actually consults to resolve "ClusterSecretStore"
+#      to a REST endpoint -- hasn't caught up yet, reproduced live as
+#      `no matches for kind "ClusterSecretStore" in version
+#      "external-secrets.io/v1"`.
+#   2. Once the CRD resolves, applying a ClusterSecretStore also triggers
+#      ESO's OWN validating webhook (`validate.clustersecretstore.
+#      external-secrets.io`) -- reproduced live as a `connection refused`
+#      against `external-secrets-webhook.external-secrets.svc` when the
+#      webhook Service exists (Service objects come up fast) but its
+#      backing Deployment isn't Ready yet (cold image pull).
+# ArgoCD's own Healthy rollup for a Deployment already means "available
+# replicas" -- waiting on it covers both the CRD-establishment and the
+# webhook-readiness gaps in one signal, rather than chasing each
+# individually.
 i=0
-while ! kubectl get crd clustersecretstores.external-secrets.io >/dev/null 2>&1; do
+while true; do
+  sync=$(kubectl -n argocd get application external-secrets -o jsonpath='{.status.sync.status}' 2>/dev/null || echo "")
+  health=$(kubectl -n argocd get application external-secrets -o jsonpath='{.status.health.status}' 2>/dev/null || echo "")
+  [ "$sync" = "Synced" ] && [ "$health" = "Healthy" ] && { echo "OK: external-secrets Application Healthy (CRDs + webhook ready)"; break; }
   i=$((i + 1))
-  [ "$i" -gt 60 ] && { echo "FAIL: clustersecretstores.external-secrets.io CRD not found after 5m"; exit 1; }
+  [ "$i" -gt 60 ] && { echo "FAIL: external-secrets Application not Healthy after 5m (sync=$sync health=$health)"; exit 1; }
   sleep 5
 done
-kubectl apply -f environments/kind/infra/cluster-secret-store.yaml
+# Still retried for a short window as a second layer: a client-side
+# discovery-cache staleness gap on the machine running kubectl can
+# outlast even the CRD's own Established condition on some kubectl
+# versions.
+i=0
+until kubectl apply -f environments/kind/infra/cluster-secret-store.yaml; do
+  i=$((i + 1))
+  [ "$i" -gt 18 ] && { echo "FAIL: cluster-secret-store.yaml apply kept failing after 3m"; exit 1; }
+  sleep 10
+done
 i=0
 while [ "$(kubectl get clustersecretstore platform -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" != "True" ]; do
   i=$((i + 1))
