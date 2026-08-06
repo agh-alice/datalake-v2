@@ -1,0 +1,41 @@
+# Plan 5 Task 3 Step 5: hand-authored PodMonitors for both CNPG clusters,
+# replacing the retired `spec.monitoring.enablePodMonitor` toggle (see
+# templates/{landing-db,lakekeeper-db}.yaml). Selector shape
+# (`cnpg.io/cluster: <cluster-name>`) matches CNPG's own manually-managed-
+# PodMonitor documentation example verbatim (docs/src/monitoring.md,
+# cloudnative-pg/cloudnative-pg, fetched 2026-08-06); `port: metrics` is
+# the CNPG operator's own fixed port name on every instance pod, unrelated
+# to which storage class/placement values are in play.
+#
+# `release: monitoring` is required for adoption: the platform's Prometheus
+# (`kubectl get prometheus -o jsonpath`, live-verified 2026-08-06) carries
+# `podMonitorSelector: {matchLabels: {release: monitoring}}` with an empty
+# `podMonitorNamespaceSelector` (all namespaces) -- same adoption-gate
+# shape as ruleSelector/serviceMonitorSelector, label is the only gate.
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: mon-data
+  namespace: datalake-storage
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: mon-data
+  podMetricsEndpoints:
+    - port: metrics
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: lakekeeper-db
+  namespace: datalake-storage
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: lakekeeper-db
+  podMetricsEndpoints:
+    - port: metrics

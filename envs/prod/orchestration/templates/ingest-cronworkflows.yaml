@@ -61,18 +61,24 @@ spec:
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-nightly"]
+          resources:
+            {{- toYaml .Values.ingest.resources.nightly | nindent 12 }}
       - name: run-retention
         container:
           image: {{ .Values.images.ingest }}
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-retention"]
+          resources:
+            {{- toYaml .Values.ingest.resources.retention | nindent 12 }}
       - name: check-freshness
         container:
           image: {{ .Values.images.ingest }}
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["check-freshness"]
+          resources:
+            {{- toYaml .Values.ingest.resources.freshness | nindent 12 }}
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
@@ -97,6 +103,8 @@ spec:
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-sitesonar"]
+          resources:
+            {{- toYaml .Values.ingest.resources.sitesonar | nindent 12 }}
 ---
 # Plan 2 Task 5 / Plan 3 Task 3: weekly Iceberg maintenance -- pyiceberg
 # metadata-only snapshot expiry (design D12, ingest/src/alice_ingest/
@@ -146,9 +154,13 @@ spec:
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-maintenance"]
+          resources:
+            {{- toYaml .Values.ingest.resources.maintenance | nindent 12 }}
       - name: run-trino-maintenance
         container:
           image: {{ .Values.images.ingest }}
           envFrom:
             - secretRef: {name: ingest-env}
           args: ["run-trino-maintenance"]
+          resources:
+            {{- toYaml .Values.ingest.resources.trinoMaintenance | nindent 12 }}

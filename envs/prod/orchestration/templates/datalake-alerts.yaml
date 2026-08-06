@@ -38,6 +38,8 @@ kind: PrometheusRule
 metadata:
   name: datalake-pipeline-alerts
   namespace: datalake-orchestration
+  labels:
+    release: monitoring
 spec:
   groups:
     # Plan 2 Task 5 -- design D11's "minimum alert set" extended to the

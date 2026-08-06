@@ -18,6 +18,13 @@
 # if enabled). priorityClassName fields only *reference* an existing
 # PriorityClass by name; this chart never creates one. Namespace-only
 # confirmed; Step 1 does not block this chart.
+# Plan 5 Task 3 Step 4: gates templates/external-secrets.yaml so kind
+# keeps using hack/kind-up.sh-provisioned plain Secrets instead of an
+# ExternalSecret controller with no `platform` ClusterSecretStore to
+# resolve against. values-kind.yaml (Task 4) must override this to false.
+externalSecrets:
+  enabled: true
+
 trino:
   # fullnameOverride pins the in-cluster Service name to a short,
   # predictable "trino" regardless of whatever Helm release name Task 4/5
@@ -61,7 +68,37 @@ trino:
   server:
     workers: 0
 
+  # Plan 5 Task 3 Step 2: `cpu: x86-64-v3` deliberately, not `pool: avx2`.
+  # The db-0/1/2 nodes also carry cpu=x86-64-v3 (live-verified 2026-08-06,
+  # `kubectl get nodes --show-labels`), so this selector alone would also
+  # match them. The brief's premise that this is harmless because those
+  # nodes carry `dedicated=database:NoSchedule` does NOT hold today --
+  # live-verified the same session (`kubectl get nodes -o
+  # jsonpath='{.spec.taints}'`): none of db-0/1/2 currently carries that
+  # taint, so nodeSelector alone would let a coordinator pod land on a
+  # database node and compete with Postgres for memory/IO on nodes meant
+  # to be reserved for it. Flagged in task-3-report.md as a live-cluster
+  # finding for the platform (the taint may simply not have been applied
+  # yet). Compensated here with an explicit nodeAffinity exclusion on
+  # `datalake.agh.edu.pl/role` (present on db-0/1/2, absent on avx2-0 and
+  # any future v3 worker -- same label the brief's own node-facts list
+  # uses) so the coordinator is excluded from db nodes regardless of
+  # whether the taint exists, while `cpu: x86-64-v3` keeps the "future v3
+  # workers auto-eligible" property `pool: avx2` would not have had. kind
+  # has no x86-64-v3-labeled nodes -- values-kind.yaml (Task 4) must
+  # override `coordinator.nodeSelector` to `{}` and `coordinator.affinity`
+  # to `{}`.
   coordinator:
+    nodeSelector:
+      cpu: x86-64-v3
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: datalake.agh.edu.pl/role
+                  operator: NotIn
+                  values: [database]
     config:
       # Load-bearing for coordinator-only mode, re-verified against the
       # pulled 1.42.2 chart the same way: without this the coordinator
@@ -73,14 +110,25 @@ trino:
       # same property name as 1.40.0.
       nodeScheduler:
         includeCoordinator: true
-    # jvm.maxHeapSize / resources.requests+limits deliberately NOT set
-    # here (chart default is `jvm.maxHeapSize: "8G"`, `resources: {}`) --
-    # both are Task 3's job (Global Constraints: every container gets CPU
-    # + memory requests, "sized from measurement, not guesswork"; heap
-    # sizing is paired with the memory limit Task 3 picks, not a Task 2
-    # decision). The chart also offers `jvm.maxHeapPercent` as an
-    # alternative tied automatically to the container memory limit --
-    # worth Task 3 considering instead of a hardcoded maxHeapSize.
+    # Plan 5 Task 3 Step 3: sized against cyfronet-cluster-requirements.md's
+    # measured/projected coordinator figure ("coordinator 8 GiB") and the
+    # kind-measured baseline ("Trino coordinator ~= 1.2 GiB on kind") --
+    # comfortably under the compute tier's 12 CPU / 28Gi agreed quota, with
+    # headroom for the 240k-design-point query load this design targets.
+    # `jvm.maxHeapPercent` (tying heap to the container memory limit
+    # instead of a hardcoded maxHeapSize) was considered but NOT used:
+    # the same dependency-values null-propagation bug the tpch/tpcds
+    # comment below documents (helm/helm#9027) means
+    # `coordinator.jvm.maxHeapSize: null` from THIS chart's values.yaml
+    # would not actually unset the trino subchart's own default
+    # `jvm.maxHeapSize: "8G"` -- both flags would render and conflict.
+    # Simpler and unaffected by that bug: leave the chart's default 8G
+    # heap as-is and size the memory limit around it (8G heap + ~2Gi
+    # off-heap/native headroom, the standard JVM-in-container rule of
+    # thumb).
+    resources:
+      requests: {cpu: 2, memory: 4Gi}
+      limits: {memory: 10Gi}
 
   # Injects the `landing` catalog's PostgreSQL credentials as env vars
   # (LANDING_RO_USER/LANDING_RO_PASSWORD) on the coordinator pod, ported
@@ -138,32 +186,29 @@ trino:
     # holds a static S3 access/secret key here (same as kind) -- only
     # these three connection-shape properties are unresolved.
     #
-    # IMPORTANT, unlike envs/prod/orchestration/values.yaml's ingest-env
-    # placeholders (which live inside a comment block and never render):
-    # the `<cyfronet-s3-endpoint>`/`<cyfronet-s3-region>` strings below ARE
-    # live values -- they render straight into the trino-catalog ConfigMap
-    # the coordinator reads at startup. This chart is therefore NOT
-    # syncable to prod as committed: a real sync would have Trino try to
-    # resolve the literal string `<cyfronet-s3-endpoint>` as an S3 host and
-    # fail loudly on every `lake.*` query. That is the deliberate choice
-    # over omitting the properties, which would leave
-    # `fs.native-s3.enabled=true` with no endpoint override and silently
-    # default to AWS instead of failing closed. Replace both values when
-    # Plan 4 gate G2 closes -- out of this task's scope, but explicitly
-    # NOT a cosmetic placeholder like the orchestration precedent; flagged
-    # in task-2-report.md for the controller.
-    lake: |
-      connector.name=iceberg
-      iceberg.catalog.type=rest
-      iceberg.rest-catalog.uri=http://lakekeeper.datalake-storage.svc:8181/catalog
-      iceberg.rest-catalog.warehouse=default
-      iceberg.rest-catalog.security=OAUTH2
-      iceberg.rest-catalog.oauth2.token=dummy
-      iceberg.rest-catalog.vended-credentials-enabled=true
-      fs.native-s3.enabled=true
-      s3.endpoint=<cyfronet-s3-endpoint>
-      s3.region=<cyfronet-s3-region>
-      s3.path-style-access=true
+    # Plan 5 Task 3 Decision 2: the `lake` catalog is CONDITIONAL, not
+    # defined in this file at all -- see values-lake.yaml, a values file
+    # layered in ONLY once real S3 values exist (Plan 4 gate G2). Rendering
+    # `helm template envs/prod/compute -f values.yaml` alone (no
+    # values-lake.yaml) gives a coordinator serving `landing` (+ system,
+    # +tpch/tpcds per the helm/helm#9027 note below) with no `lake` catalog
+    # at all -- which is what Plan 4's dual-run comparison needs anyway.
+    # This replaces the prior design (a `lake` catalog defined here with
+    # live `<cyfronet-s3-endpoint>`/`<cyfronet-s3-region>` placeholder
+    # strings that would fail every `lake.*` query on a real sync): a red
+    # Application on first deploy trains people to ignore red, whereas a
+    # Trino that is honestly missing one catalog is discoverable and safe.
+    # Content-level conditionals inside the catalog string were considered
+    # and rejected: the trino chart's configmap-catalog.yaml does run
+    # `tpl` on each catalog value (so `{{ if }}` inside the string IS
+    # possible, verified against the pulled chart's own template), but
+    # that only controls the catalog's CONTENTS, not whether the `lake`
+    # KEY exists in `.Values.catalogs` at all -- an empty/malformed
+    # `lake.properties` file would still render and break coordinator
+    # startup for every catalog, not just `lake`. Only omitting the key
+    # -- which values.yaml, being plain (non-templated) data, cannot do
+    # conditionally on its own -- actually avoids that.
+    #
     # PostgreSQL federation -> the CNPG landing cluster `mon-data`
     # (envs/prod/storage/templates/landing-db.yaml), namespace retargeted
     # from `mon-data-rw.landing-db.svc` to `mon-data-rw.datalake-storage.svc`
@@ -199,15 +244,16 @@ trino:
     # cannot invoke one, so local render and real sync would diverge; not
     # attempted for that reason (see task-2-report.md).
     #
-    # Consequence: `lake`/`landing`/`tpch`/`tpcds`/`system` ALL render into
-    # trino-catalog's ConfigMap as committed. This breaks
-    # hack/kind-verify.sh's SHOW CATALOGS hard gate (`catalogs !=
-    # ["lake", "landing", "system"]` -> exit 1) once Task 4 rewires the
-    # kind harness onto this dependency-based chart -- Task 4 needs to
-    # know this before its clean-room `make kind-verify` run, and either
-    # relax that assertion (e.g. to a subset check) or find a different
-    # mechanism. tpch/tpcds are inert synthetic connectors (no S3/DB
-    # backend, no credentials, no data) -- a correctness/gate concern, not
-    # a security one.
+    # Consequence: `landing`/`tpch`/`tpcds`/`system` render into
+    # trino-catalog's ConfigMap as committed (`lake` no longer among them
+    # by default -- Plan 5 Task 3 Decision 2, above, moved it to
+    # values-lake.yaml). This still breaks hack/kind-verify.sh's SHOW
+    # CATALOGS hard gate (`catalogs != ["lake", "landing", "system"]` ->
+    # exit 1) once Task 4 rewires the kind harness onto this
+    # dependency-based chart -- Task 4 needs to know this before its
+    # clean-room `make kind-verify` run, and either relax that assertion
+    # (e.g. to a subset check) or find a different mechanism. tpch/tpcds
+    # are inert synthetic connectors (no S3/DB backend, no credentials, no
+    # data) -- a correctness/gate concern, not a security one.
     tpch: null
     tpcds: null

@@ -1,11 +1,10 @@
 {{/*
 datalake-compute chart helpers — intentionally minimal.
 
-Plan 5 Task 1: this tier has no authored templates of its own yet. Trino
-arrives as a chart dependency in Plan 5 Task 2 (envs/prod/compute/Chart.yaml
-`dependencies:`), which is what will actually populate this chart's
-rendered output. Until then, `helm template envs/prod/compute` renders
-nothing beyond this file's comment (which itself produces no manifest --
-Helm skips template files whose output is empty), satisfying the "renders
-to empty output cleanly" requirement (Task 1 brief).
+Plan 5 Task 1: at that point this tier had no authored templates of its
+own; Trino arrived as a chart dependency in Plan 5 Task 2
+(envs/prod/compute/Chart.yaml `dependencies:`), and Plan 5 Task 3 added
+this chart's first authored template (templates/external-secrets.yaml).
+This helpers file itself still defines nothing (no shared naming/label
+logic has been needed yet) and renders no manifest on its own.
 */}}

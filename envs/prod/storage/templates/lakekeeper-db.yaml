@@ -22,9 +22,19 @@ spec:
   imageName: ghcr.io/cloudnative-pg/postgresql:16.6@sha256:53be6d727c7b3cf0df2b147f7ce7cdd31d37fd285314294871a4ccc3837b6872
   storage:
     size: {{ .Values.lakekeeperDb.storageSize }}
+    storageClass: {{ .Values.lakekeeperDb.storageClass }}
+  # Plan 5 Task 3 Step 2 -- see templates/landing-db.yaml's identical block
+  # for the live-verification note.
+  affinity:
+    nodeSelector:
+      {{- toYaml .Values.placement.nodeSelector | nindent 6 }}
+    tolerations:
+      {{- toYaml .Values.placement.tolerations | nindent 6 }}
+  resources:
+    {{- toYaml .Values.lakekeeperDb.resources | nindent 4 }}
   bootstrap:
     initdb:
       database: lakekeeper
       owner: lakekeeper
-  monitoring:
-    enablePodMonitor: {{ .Values.lakekeeperDb.enablePodMonitor }}
+  # Plan 5 Task 3 Step 5: enablePodMonitor retired -- see
+  # templates/landing-db.yaml's identical comment.

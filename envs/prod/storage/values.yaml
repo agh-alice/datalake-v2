@@ -2,30 +2,110 @@
 # Everything here renders into namespace datalake-storage (platform-owned,
 # not templated by this chart -- see templates/*.yaml).
 
-# enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
-# templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
-# field deprecated ("will be removed in an upcoming release") but it is
-# still present and functional in the CRD schema (verified via `kubectl
-# explain cluster.spec.monitoring.enablePodMonitor`, Task 6) -- used as-is;
-# switch to hand-authored PodMonitor resources if a future CNPG bump drops it.
+# Plan 5 Task 3 Step 2 (placement): live-verified against alice-k8s-datalake
+# 2026-08-06 (`kubectl get nodes --show-labels` / `-o jsonpath='{.spec.taints}'`).
+# Node labels match the brief exactly: db-0/1/2 carry pool=db,
+# cpu=x86-64-v3, datalake.agh.edu.pl/role=database. FINDING: none of the
+# three db nodes currently carries the dedicated=database:NoSchedule taint
+# the brief describes as already-verified (`.spec.taints` is empty on all
+# three) -- the toleration below is a no-op today but forward-compatible
+# (harmless if the platform adds the taint later; required if it already
+# had it and this read raced a change). Implemented per the plan's Decision
+# 3 regardless, not re-litigated. kind has no pool=db-labeled/tainted nodes
+# -- values-kind.yaml (Task 4, still a placeholder as of this task) must
+# override `placement` to `{nodeSelector: {}, tolerations: []}` or every
+# storage-tier pod will stay Pending on kind.
+placement:
+  nodeSelector:
+    pool: db
+  tolerations:
+    - key: dedicated
+      operator: Equal
+      value: database
+      effect: NoSchedule
+
+# Plan 5 Task 3 Step 4 (secrets): gates the ExternalSecret templates in this
+# chart (templates/external-secrets.yaml) so kind keeps using
+# hack/kind-up.sh-provisioned plain Secrets instead of racing an
+# ExternalSecret controller that has no `platform` ClusterSecretStore to
+# resolve against. values-kind.yaml (Task 4) must override this to false.
+externalSecrets:
+  enabled: true
+
+# Plan 5 Task 3 Step 5 (monitoring): `enablePodMonitor` (CNPG's built-in,
+# deprecated toggle) is RETIRED here, not just left "used as-is" as the
+# prior comment said -- verified (2026-08-06) that it cannot carry the
+# `release: monitoring` label the platform's Prometheus requires
+# (`podMonitorSelector: {matchLabels: {release: monitoring}}`, live-checked
+# via `kubectl get prometheus -o jsonpath`, same adoption-gate shape as
+# ruleSelector). CNPG's own docs recommend hand-authored PodMonitors instead
+# of the deprecated field (cloudnative-pg/cloudnative-pg discussion #1617:
+# "cluster labels do not automatically propagate to the generated
+# PodMonitor" -- `spec.inheritedMetadata.labels` does not reach it either).
+# templates/monitoring.yaml now hand-authors one PodMonitor per CNPG
+# cluster, labelled release: monitoring, selecting on `cnpg.io/cluster`
+# (the exact selector CNPG's own manual-PodMonitor doc example uses).
 lakekeeperDb:
   instances: 2
   storageSize: 5Gi
-  enablePodMonitor: true
+  # Plan 5 Task 3 Step 1: durable Cinder class, confirmed live (2026-08-06,
+  # `kubectl get storageclass`) -- cinder-perf (n.performance, 5014 IOPS /
+  # 3.009 ms fsync) is the cluster default AND the fastest class, but
+  # allowVolumeExpansion:false; csi-cinder-sc-retain is the only expandable
+  # class but is the untyped/slow cloud-default tier (2919 IOPS / 46.6 ms).
+  # Volumes keep their type forever, so trading speed for future
+  # expandability would permanently strand the DB on the slow tier --
+  # cinder-perf wins on that basis, storage-finding posted to the
+  # platform's issue #3 asking them to flip allowVolumeExpansion on it.
+  storageClass: cinder-perf
+  # Sized one notch above the catalog DB's genuinely light load ("commits
+  # a handful/run" -- ledger) but still conservative against OOM, same
+  # reasoning as landingDb.resources below.
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {memory: 1Gi}
 
 landingDb:
   instances: 3
-  storageSize: 50Gi
+  # 40Gi, not the plan's original 25Gi: cinder-perf cannot expand today
+  # (allowVolumeExpansion: false, live-verified), so start-small-then-grow
+  # isn't available -- 40Gi is sized for the full working set up front.
+  # 25Gi becomes correct again if/when the platform flips
+  # allowVolumeExpansion on cinder-perf (posted to issue #3) -- purely a
+  # values change, but only right up until the first PVC actually exists;
+  # storage.size shrinks are rejected by the CNPG/Cinder stack once a
+  # volume is provisioned at 40Gi.
+  storageSize: 40Gi
+  storageClass: cinder-perf
   maxConnections: "60"
-  enablePodMonitor: true
+  # cyfronet-cluster-requirements.md's only WRITTEN sizing evidence for
+  # this database is "request 4 GiB / limit 8 GiB each (shared_buffers 2
+  # GiB) -- the working set is ~10 GB total data" -- that estimate predates
+  # the tenant-quota renegotiation but is still the only real-workload
+  # sizing basis in the repo (kind's 59 MiB idle figure is a single-
+  # instance fixture-scale measurement, not evidence about the production
+  # working set under max_connections=60 and real ingestion). Landed at
+  # half that doc's number, not the kind figure: with synchronous_commit
+  # left at its CNPG/Postgres default (not yet tuned per that doc's Part 1
+  # -- out of this task's scope), per-backend memory + shared_buffers + WAL
+  # buffers under real load is what gets OOMKilled, and unlike CPU
+  # (unlimited here, matching this repo's no-cpu-limit convention -- see
+  # templates/echo-receiver.yaml), a memory LIMIT breach is a hard failure.
+  # 3 x 4Gi limit = 12Gi, one quarter of the storage tier's 48Gi quota --
+  # comfortable headroom either way; this is a case for erring toward the
+  # doc's number, not away from it.
+  resources:
+    requests: {cpu: 500m, memory: 2Gi}
+    limits: {memory: 4Gi}
 
 # Lakekeeper's Postgres secret-store encryption key lives in Secret
 # datalake-storage/lakekeeper-pg-encryption -- created by hack/kind-up.sh on
-# kind (random per cluster) and, on the prod tenant cluster, by an
-# ExternalSecret against the platform's ClusterSecretStore (Plan 5 Task 3).
-# Never templated in this chart (no-secrets-in-rendered-branches
-# constraint; upstream auto-generation relies on helm lookup which ArgoCD
-# render does not support, argoproj/argo-cd#5202).
+# kind (random per cluster) and, on the prod tenant cluster, by the
+# ExternalSecret in templates/external-secrets.yaml (Plan 5 Task 3) against
+# the platform's ClusterSecretStore `platform`. Never templated in this
+# chart (no-secrets-in-rendered-branches constraint; upstream
+# auto-generation relies on helm lookup which ArgoCD render does not
+# support, argoproj/argo-cd#5202).
 #
 # Plan 5 Task 1 note: this Secret's namespace changes from the old
 # umbrella chart's dedicated `lakekeeper` namespace to `datalake-storage`
@@ -55,6 +135,48 @@ lakekeeper:
   # the pulled chart (2026-08-06): templates/service.yaml names the
   # Service via the same `iceberg-catalog.fullname` helper this overrides.
   fullnameOverride: lakekeeper
+
+  # Plan 5 Task 3 Step 2/3: placement and resources for the catalog app.
+  # nodeSelector/tolerations are LITERALLY repeated from this file's
+  # top-level `placement:` block, not referenced -- values.yaml is plain
+  # data, not Go-templated, so a subchart-values key (everything under
+  # `lakekeeper:`) cannot point back at a sibling top-level key the way a
+  # template file could with `.Values.placement`. Keep both in sync by
+  # hand if placement ever changes (same duplication trade-off this repo
+  # already accepts for e.g. the two independently-verified digest pins).
+  # catalog.nodeSelector/tolerations also drive the db-migration Job
+  # (verified against the pulled chart's templates/db-migration.yaml,
+  # Task 2) -- one setting places both the long-running catalog Deployment
+  # and its one-shot migration Job.
+  catalog:
+    nodeSelector:
+      pool: db
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: database
+        effect: NoSchedule
+    # Catalog API server (Rust, stateless REST service) -- kind-measured
+    # "lakekeeper (+its CNPG): 216 MiB" combined (cyfronet-cluster-
+    # requirements.md) covers both this container and its CNPG pods; sized
+    # generously above the catalog app's share of that alone.
+    resources:
+      requests: {cpu: 200m, memory: 256Mi}
+      limits: {memory: 512Mi}
+    dbMigrations:
+      # One-shot Helm-hook Job (post-install/post-upgrade migrate step),
+      # not a steady-state pod -- sized for a single sqlx migration run.
+      resources:
+        requests: {cpu: 100m, memory: 128Mi}
+        limits: {memory: 256Mi}
+    initContainers:
+      checkDb:
+        # `wait-for-db` polling loop (same image as the catalog container,
+        # no extra pull) -- present in both the catalog Deployment and the
+        # db-migration Job's pod spec.
+        resources:
+          requests: {cpu: 25m, memory: 32Mi}
+          limits: {memory: 64Mi}
 
   # Bundled `groundhog2k/postgres` subchart disabled; DB config uses
   # discrete host/port/database (plain values; not sensitive) plus

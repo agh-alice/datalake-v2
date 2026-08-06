@@ -1,0 +1,37 @@
+# Plan 5 Task 3 Decision 2: the `lake` Iceberg catalog, layered on TOP of
+# values.yaml (`helm template envs/prod/compute -f values.yaml -f
+# values-lake.yaml`) only once real Cyfronet S3 connection details exist
+# (Plan 4 gate G2). Without this file, `trino.catalogs` has no `lake` key
+# at all and the coordinator comes up serving `landing` alone -- see
+# values.yaml's `catalogs:` comment for the full mechanism/rationale
+# (helm's own deep-merge across `-f` files at THIS chart's top level is
+# what makes this work; it is unrelated to -- and unaffected by -- the
+# separate helm/helm#9027 null-propagation issue that blocks deleting the
+# trino subchart's own tpch/tpcds defaults).
+#
+# ACTIVATION: replace both `<cyfronet-s3-endpoint>`/`<cyfronet-s3-region>`
+# placeholders below with real values once G2 closes, then add this file
+# to the compute Application's `helm.valueFiles` (Task 5's hydration
+# entry point owns that wiring -- out of Task 3's scope). Property names
+# re-verified against Trino 480's own docs (values.yaml's `catalogs:`
+# comment has the citations) -- unchanged from this same block when it
+# lived in values.yaml.
+#
+# No S3 access/secret key here or anywhere in this file: Lakekeeper vends
+# STS credentials (`iceberg.rest-catalog.vended-credentials-enabled=true`
+# below) -- Trino never holds a static S3 credential for this catalog, so
+# nothing here is a secret value.
+trino:
+  catalogs:
+    lake: |
+      connector.name=iceberg
+      iceberg.catalog.type=rest
+      iceberg.rest-catalog.uri=http://lakekeeper.datalake-storage.svc:8181/catalog
+      iceberg.rest-catalog.warehouse=default
+      iceberg.rest-catalog.security=OAUTH2
+      iceberg.rest-catalog.oauth2.token=dummy
+      iceberg.rest-catalog.vended-credentials-enabled=true
+      fs.native-s3.enabled=true
+      s3.endpoint=<cyfronet-s3-endpoint>
+      s3.region=<cyfronet-s3-region>
+      s3.path-style-access=true

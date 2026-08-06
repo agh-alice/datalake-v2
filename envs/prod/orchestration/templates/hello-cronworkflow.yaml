@@ -28,4 +28,6 @@ spec:
         container:
           image: {{ .Values.images.busybox }}
           command: [sh, -c, "echo hello from datalake-v2 && date"]
+          resources:
+            {{- toYaml .Values.helloCron.resources | nindent 12 }}
 {{- end }}

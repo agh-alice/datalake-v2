@@ -25,6 +25,8 @@ kind: PrometheusRule
 metadata:
   name: datalake-alerts
   namespace: datalake-storage
+  labels:
+    release: monitoring
 spec:
   groups:
     - name: datalake

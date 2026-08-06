@@ -15,6 +15,20 @@
 # kind-verify's probe needs it.
 helloCron:
   enabled: false
+  # Plan 5 Task 3 Step 3: trivial canary container (busybox echo+date) --
+  # every container needs requests regardless of whether it's enabled by
+  # default (the platform's ResourceQuota applies to any pod that runs,
+  # including on kind where values-kind.yaml turns this on).
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {memory: 32Mi}
+
+# Plan 5 Task 3 Step 4: gates templates/external-secrets.yaml so kind
+# keeps using hack/kind-up.sh-provisioned plain Secrets instead of an
+# ExternalSecret controller with no `platform` ClusterSecretStore to
+# resolve against. values-kind.yaml (Task 4) must override this to false.
+externalSecrets:
+  enabled: true
 
 # echo-receiver: kind-only Slack-webhook stand-in the `slack-datalake`
 # Alertmanager receiver posts to (the platform's Alertmanager, per Plan 5
@@ -93,6 +107,46 @@ ingest:
     sitesonar: 21600
     maintenance: 3600
   retentionDays: "14"
+  # Plan 5 Task 3 Step 3: CPU + memory requests/limits per DAG step
+  # (templates/ingest-cronworkflows.yaml). `run-nightly` (the dlt
+  # ingestion + JDL canonicalization leg) is sized directly from
+  # cyfronet-cluster-requirements.md's already-agreed figure -- "Ingest
+  # CronWorkflows: transient 2-4GiB nightly (request 2/limit 4; set at
+  # cyfronet activation -- tracked ride-along N6)" -- this task is that
+  # activation. CPU held at 1 (not more): the dress rehearsal's real-data
+  # finding was that the JDL leg is single-core CPU-bound (research/
+  # 2026-07-13_production-data-dress-rehearsal.md, ~45h projected for the
+  # full 9.9M backlog at that rate) -- a higher CPU request wouldn't speed
+  # up a single-threaded stage, but the request still needs to be >= what
+  # one core's worth of sustained work needs to avoid throttling during
+  # the backfill burst. The other steps are lighter DB/HTTP-bound legs,
+  # scaled down from run-nightly's baseline. concurrencyPolicy: Forbid
+  # keeps each CronWorkflow's own steps sequential (DAG dependencies, only
+  # one step's pod exists at a time within one Workflow), but nightly
+  # (up to its 6h activeDeadlineSeconds) can in principle still overlap a
+  # neighboring CronWorkflow's own run -- worst-case concurrent total
+  # (nightly's heaviest step + sitesonar + trino-maintenance) is well
+  # under the orchestration tier's 8 CPU / 16Gi agreed quota (see
+  # task-3-report.md for the arithmetic).
+  resources:
+    nightly:
+      requests: {cpu: 1, memory: 2Gi}
+      limits: {memory: 4Gi}
+    retention:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {memory: 1Gi}
+    freshness:
+      requests: {cpu: 100m, memory: 256Mi}
+      limits: {memory: 512Mi}
+    sitesonar:
+      requests: {cpu: 500m, memory: 1Gi}
+      limits: {memory: 2Gi}
+    maintenance:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {memory: 1Gi}
+    trinoMaintenance:
+      requests: {cpu: 250m, memory: 512Mi}
+      limits: {memory: 1Gi}
 
 # ---------------------------------------------------------------------
 # Folded in from the old umbrella chart's chart/values-cyfronet.yaml
@@ -101,43 +155,28 @@ ingest:
 # key (ingest.retentionDays: "14") duplicated the base default above and
 # is not repeated as a second layer; the illustrative documentation is
 # preserved below, DNS/namespace names updated for the three-tier split.
-# No new ExternalSecret resource is created by this task (Plan 5 Task 3's
-# job) -- this remains documentation only, same as it was before the split.
 #
-# ingest (Plan 2 Task 6): no Helm-templated Secret or ExternalSecret exists
-# for `datalake-orchestration/ingest-env` in this chart -- same
+# ingest (Plan 2 Task 6): no Helm-templated plaintext Secret exists for
+# `datalake-orchestration/ingest-env` in this chart -- same
 # "no-secrets-in-rendered-branches" convention as lakekeeper-pg-encryption
 # (envs/prod/storage/values.yaml's comment). On kind, hack/kind-up.sh
 # creates `ingest-env` directly from harness-generated/in-cluster values.
-# On the prod tenant cluster it must be sourced via an ExternalSecret
-# instead, against the platform's ClusterSecretStore (Plan 5 Task 3;
-# same pattern docs/runbooks/bootstrap-cyfronet.md §5 already used for
-# lakekeeper-pg-encryption) -- applied once, out-of-band, NOT by this
-# chart:
+# On the prod tenant cluster it is now sourced via a real ExternalSecret
+# (Plan 5 Task 3, templates/external-secrets.yaml) against the platform's
+# ClusterSecretStore `platform` (verified live 2026-08-06 -- superseding
+# the "<platform ClusterSecretStore name, TO VERIFY>" placeholder this
+# comment used to carry). remoteRef uses `property` (not just `key`,
+# which the illustrative sketch this replaces omitted) -- ESO's Kubernetes
+# provider JSON-encodes the WHOLE remote Secret when `property` is absent
+# (verified against external-secrets.io/latest/provider/kubernetes); every
+# item below points at the single remote Secret `ingest-env` in
+# eso-secret-source, selecting one field each via `property`.
 #
-#   apiVersion: external-secrets.io/v1
-#   kind: ExternalSecret
-#   metadata: {name: ingest-env, namespace: datalake-orchestration}
-#   spec:
-#     refreshInterval: 1h
-#     secretStoreRef: {name: <platform ClusterSecretStore name, TO VERIFY>, kind: ClusterSecretStore}
-#     target: {name: ingest-env}
-#     data:
-#       - {secretKey: PG_URL, remoteRef: {key: ingest-pg-url}}
-#       - {secretKey: S3_ENDPOINT, remoteRef: {key: ingest-s3-endpoint}}
-#       - {secretKey: S3_ACCESS_KEY, remoteRef: {key: ingest-s3-access-key}}
-#       - {secretKey: S3_SECRET_KEY, remoteRef: {key: ingest-s3-secret-key}}
-#       - {secretKey: S3_BUCKET, remoteRef: {key: ingest-s3-bucket}}
-#       - {secretKey: S3_REGION, remoteRef: {key: ingest-s3-region}}
-#       - {secretKey: LAKEKEEPER_URI, remoteRef: {key: ingest-lakekeeper-uri}}
-#       - {secretKey: LAKEKEEPER_WAREHOUSE, remoteRef: {key: ingest-lakekeeper-warehouse}}
-#       - {secretKey: RETENTION_DAYS, remoteRef: {key: ingest-retention-days}}
-#       - {secretKey: TRINO_URI, remoteRef: {key: ingest-trino-uri}}
-#
-# Illustrative env-var contract (docs/runbooks/ingestion-pipeline.md owns
-# the authoritative table) with in-cluster DNS names updated for the
-# three-tier split -- S3/object-storage values are still TO VERIFY against
-# real cyfronet/platform credentials (Plan 5 Task 3):
+# Env-var contract (docs/runbooks/ingestion-pipeline.md owns the
+# authoritative table) with in-cluster DNS names updated for the
+# three-tier split -- S3/object-storage VALUES are still TO VERIFY against
+# real cyfronet/platform credentials (Plan 4 gate G2); the delivery
+# MECHANISM (this ExternalSecret) is Plan 5 Task 3's job and is done:
 #   PG_URL                postgresql://mon_user:<REDACTED>@mon-data-rw.datalake-storage:5432/mon_data
 #   S3_ENDPOINT            <platform/cyfronet S3 endpoint>              # TO VERIFY
 #   S3_ACCESS_KEY          <platform/cyfronet S3 access key id>         # TO VERIFY
