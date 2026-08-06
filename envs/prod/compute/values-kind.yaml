@@ -21,8 +21,8 @@ trino:
     digest: "sha256:00125e40d063bc4816d165482f6044872b18b56026fb959d3b28ce1f96ffbbee"
 
   # Placement neutralised, NOT labelled to match (the one exception to the
-  # brief's "prefer labelling" guidance, and a deliberate one -- see
-  # task-4-report.md). values.yaml's `cpu: x86-64-v3` nodeSelector plus its
+  # brief's "prefer labelling" guidance, and a deliberate one -- reasons
+  # below). values.yaml's `cpu: x86-64-v3` nodeSelector plus its
   # nodeAffinity exclusion both assume real x86-64-v3 hardware exists
   # somewhere in the cluster to select. Labelling the kind worker
   # `cpu: x86-64-v3` would be FALSE (this host lacks AVX2, verified above)
@@ -78,18 +78,21 @@ trino:
   # lakekeeper` + this same chart's own `catalogs.landing` block, already
   # retargeted the same way).
   #
-  # Coordinator review finding (Task 2/3 review, relayed live to Task 4):
-  # this file necessarily touches other keys under `trino:` too (image,
-  # coordinator, above) -- ANY second `-f` values file touching `trino:`
-  # flips Helm's dependency-values coalescing so values.yaml's
-  # `tpch: null`/`tpcds: null` deletions DO propagate (empirically
-  # confirmed by the reviewer against this exact chart+dependency shape,
-  # not the earlier "never propagates" read). Consequence: kind's rendered
-  # catalog set is expected to be {lake, landing, system} -- no demo
-  # catalogs -- unlike a single-file render (landing/tpch/tpcds/system).
-  # hack/kind-verify.sh's SHOW CATALOGS gate asserts the allowlist +
-  # required-pair shape (brief), which passes either way; it does not
-  # assume one outcome over the other.
+  # Coordinator review finding (Task 2/3 review, relayed live to Task 4;
+  # CORRECTED by a later review, reproduced live 2026-08-06 -- supersedes
+  # this comment's earlier "needs a second `-f` file touching `trino:`"
+  # read). The actual threshold for Helm's dependency-values coalescing to
+  # honor values.yaml's `tpch: null`/`tpcds: null` deletions is not "a
+  # second -f file" -- it is any explicit `-f` at all, vs relying on `helm
+  # template <chart>`'s own auto-loaded values.yaml. `-f values.yaml`
+  # ALONE already deletes tpch/tpcds (see that file's own `catalogs:`
+  # comment for the full three-way reproduction); this file's own `trino:`
+  # touches (image, coordinator, above) are not what flips the coalescing
+  # -- they just add `lake` on top of a deletion that already happened.
+  # Consequence unchanged either way: kind's rendered catalog set is
+  # {lake, landing, system} -- no demo catalogs. hack/kind-verify.sh's SHOW
+  # CATALOGS gate documents its own (kind-only) scope alongside this same
+  # correction.
   catalogs:
     lake: |
       connector.name=iceberg

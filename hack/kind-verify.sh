@@ -586,24 +586,48 @@ spec:
 
           # Hard gate (Plan 5 Task 4 -- brief: relax from an exact set to
           # "lake and landing are present, AND nothing appears outside the
-          # allowlist {lake, landing, system, tpch, tpcds}"). Reason
-          # (Task 2/3 review, relayed to Task 4; NOTE: no backtick
-          # characters in this comment block, same reason as the note
-          # further down this same unquoted heredoc -- see that note):
-          # Helm cannot delete subchart values keys through the
-          # dependencies: path (a confirmed upstream limitation,
-          # helm/helm#9027 and friends) -- UNLESS a second -f values file
-          # also touches a key under trino:, in which case the
-          # null-deletion DOES propagate (empirically confirmed by the
-          # reviewer against this exact chart+dependency shape).
-          # envs/prod/compute/values-kind.yaml necessarily touches trino:
-          # (image, coordinator, catalogs.lake) for its own unrelated
-          # reasons, so kind's actual rendered catalog set is expected to
-          # be {lake, landing, system} -- but this gate does not assume
-          # that outcome, it verifies the allowlist + required-pair shape
-          # either way (accepted, not fought: tpch/tpcds are synthetic
-          # connectors with no external I/O and no credentials, if they do
-          # appear).
+          # allowlist {lake, landing, system, tpch, tpcds}"). NOTE: no
+          # backtick characters in this comment block, same reason as the
+          # note further down this same unquoted heredoc -- see that note.
+          #
+          # Honest scope (Task 4 finish, review correction -- this
+          # replaces an earlier version of this comment that claimed the
+          # gate "passes either way" / "does not assume one outcome"):
+          # this script only ever renders envs/prod/compute with -f
+          # values.yaml -f values-kind.yaml (hack/kind-up.sh) -- it is a
+          # kind-only gate, not one exercised against a lake-disabled
+          # render. On that render the lake catalog is ALWAYS configured
+          # (values-kind.yaml's own trino.catalogs.lake block), which is
+          # why REQUIRED_CATALOGS hardcodes it below. A genuinely
+          # lake-absent render would fail the missing-catalog check
+          # immediately -- but the lake.*/lake.contract.* queries further
+          # down this same probe are NOT guarded by a "lake present"
+          # branch of their own; they assume the lake catalog
+          # unconditionally, so a lake-absent render that somehow got past
+          # the missing-catalog check would burn run_query()'s full
+          # 20x15s retry budget on each of those queries before failing,
+          # not fail fast. Not given a real conditional branch (accepted,
+          # not fought): kind is this script's only target and always
+          # configures lake, so that failure mode is unreachable in
+          # practice, not a live gap.
+          #
+          # ALLOWED_CATALOGS admits tpch/tpcds/system as harmless extras
+          # (inert synthetic connectors with no I/O or credentials / a
+          # Trino runtime built-in) -- not because they are expected to
+          # appear. Reason they don't, corrected 2026-08-06 (an earlier
+          # version of this comment claimed a SECOND -f file touching the
+          # trino: block was required; that read is wrong): the actual
+          # threshold for Helm's dependency-values coalescing to honor
+          # values.yaml's tpch/tpcds null deletions is any explicit -f at
+          # all vs relying on helm template's own auto-loaded values.yaml
+          # -- -f values.yaml alone already deletes them (see
+          # envs/prod/compute/values.yaml's catalogs: comment for the full
+          # three-way reproduction); kind's second file (values-kind.yaml)
+          # only adds lake, it plays no part in the deletion. So kind's
+          # actual rendered catalog set is
+          # {lake, landing, system}, no demo catalogs -- the allowlist
+          # tolerates them anyway as insurance against this mechanism,
+          # not evidence they're expected.
           ALLOWED_CATALOGS = {"lake", "landing", "system", "tpch", "tpcds"}
           REQUIRED_CATALOGS = {"lake", "landing"}
           catalog_rows = run_query("SHOW CATALOGS")

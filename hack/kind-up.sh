@@ -17,7 +17,7 @@ kind get clusters | grep -q '^datalake-v2$' || kind create cluster --config hack
 # values-kind.yaml's comment for why that selector is neutralised instead
 # of labelled. No taint is applied either: a 2-node kind cluster (control-
 # plane + one worker) has nowhere else for every other workload to run if
-# its only worker were tainted -- see task-4-report.md.
+# its only worker were tainted.
 for node in $(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name); do
   kubectl label "$node" pool=db --overwrite
 done

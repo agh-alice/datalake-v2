@@ -7,7 +7,10 @@
 # (helm's own deep-merge across `-f` files at THIS chart's top level is
 # what makes this work; it is unrelated to -- and unaffected by -- the
 # separate helm/helm#9027 null-propagation issue that blocks deleting the
-# trino subchart's own tpch/tpcds defaults).
+# trino subchart's own tpch/tpcds defaults through Helm's bare, no-`-f`
+# auto-load path specifically -- see values.yaml's `catalogs:` comment,
+# corrected 2026-08-06: any explicit `-f` at all, including this file's
+# own, already avoids that path).
 #
 # ACTIVATION: replace both `<cyfronet-s3-endpoint>`/`<cyfronet-s3-region>`
 # placeholders below with real values once G2 closes, then add this file

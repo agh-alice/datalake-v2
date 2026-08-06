@@ -5,6 +5,15 @@ KC_FLAGS=(-strict -ignore-missing-schemas -summary
   -schema-location default
   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json')
 
+# Plan 5 Task 4 review finding (TDD constraint applies to Python changes
+# generally, not just ingest/**): hack/jdl_fixture_fields.py's pure
+# functions, plus the HAND_AUTHORED-vs-seed-fixture.sh drift guard,
+# hack/tests/test_jdl_fixture_fields.py -- runs with no cluster, stdlib
+# unittest only (no pytest dependency, matching tools/tests' own
+# precedent), so it belongs ahead of the cluster-dependent gates below.
+echo "== hack/ unit tests =="
+python3 -m unittest discover -s hack/tests
+
 # Plan 5: chart/ no longer exists -- split into three standalone tier
 # charts (Task 1), each with remote Helm dependencies (Task 2: Lakekeeper,
 # Trino). Chart.lock is committed; the fetched charts/*.tgz is gitignored

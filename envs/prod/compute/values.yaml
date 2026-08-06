@@ -226,36 +226,52 @@ trino:
       connection-url=jdbc:postgresql://mon-data-rw.datalake-storage.svc:5432/mon_data
       connection-user=${ENV:LANDING_RO_USER}
       connection-password=${ENV:LANDING_RO_PASSWORD}
-    # Intent: remove the chart's default demo catalogs (tpch, tpcds).
-    # DOES NOT CURRENTLY WORK -- documented here anyway so the intent
-    # survives if this gets fixed upstream or worked around later.
+    # Intent: remove the chart's default demo catalogs (tpch, tpcds). Works
+    # for every render that actually matters; the paragraph below used to
+    # claim otherwise for ALL renders -- corrected (Task 4 review finding,
+    # reproduced live 2026-08-06).
     #
     # Null-deletes-a-parent-default-map-key is real, documented Helm
     # behavior, but ONLY when values are supplied to a chart directly
     # (`helm template <chart> -f values.yaml`, confirmed working standalone
     # against this exact chart+version during Step 1 verification). It
     # does NOT propagate through the `dependencies:` values-passing path
-    # this task uses -- confirmed empirically (rendered ConfigMap still
-    # carries tpch.properties/tpcds.properties with these nulls in place)
-    # and matches a long-standing, still-open upstream Helm limitation:
+    # this task uses when NOTHING is passed via `-f` (Helm's own
+    # chart-default auto-load, `helm template envs/prod/compute` with no
+    # flags) -- confirmed empirically (rendered ConfigMap still carries
+    # tpch.properties/tpcds.properties with these nulls in place) and
+    # matches a long-standing, still-open upstream Helm limitation:
     # helm/helm#9027, #9136, #5184, #3117 (nested/subchart null values
-    # silently fail to delete a dependency chart's default map keys, only
-    # the top-level chart's own values.yaml honors the deletion). No clean
-    # workaround exists within Helm's values model alone -- a post-renderer
-    # would fix `helm template` locally but ArgoCD's native Helm source
-    # cannot invoke one, so local render and real sync would diverge; not
-    # attempted for that reason (see task-2-report.md).
+    # silently fail to delete a dependency chart's default map keys through
+    # that specific auto-load path). CORRECTION: an earlier version of this
+    # comment (and of hack/kind-verify.sh / values-kind.yaml) additionally
+    # claimed this same failure persists through any SINGLE explicit `-f`
+    # file and needs a second one touching `trino:` to clear -- that read
+    # is wrong. The real threshold is any explicit `-f` at all vs the bare
+    # auto-load case, reproduced directly against this chart:
+    #   helm template envs/prod/compute                    (no -f)   -> {landing, tpch, tpcds}
+    #   helm template envs/prod/compute -f values.yaml   (this file alone) -> {landing} only
+    #   ... -f values.yaml -f values-kind.yaml      (kind's actual render) -> {lake, landing}
+    # i.e. `-f values.yaml` on its own already deletes tpch/tpcds -- kind's
+    # second file (values-kind.yaml) only adds `lake`, it plays no part in
+    # the deletion. No clean workaround exists for the remaining (bare,
+    # no-`-f`) failure mode within Helm's values model alone -- a
+    # post-renderer would fix `helm template` locally but ArgoCD's native
+    # Helm source cannot invoke one, so local render and real sync would
+    # diverge; not attempted for that reason (see task-2-report.md). Moot
+    # in practice: every real render path (ArgoCD's `helm.valueFiles`, this
+    # repo's `hack/lint.sh`, `hack/kind-up.sh`) passes at least one
+    # explicit `-f`, so the bare-render failure mode is never actually hit.
     #
-    # Consequence: `landing`/`tpch`/`tpcds`/`system` render into
-    # trino-catalog's ConfigMap as committed (`lake` no longer among them
-    # by default -- Plan 5 Task 3 Decision 2, above, moved it to
-    # values-lake.yaml). This still breaks hack/kind-verify.sh's SHOW
-    # CATALOGS hard gate (`catalogs != ["lake", "landing", "system"]` ->
-    # exit 1) once Task 4 rewires the kind harness onto this
-    # dependency-based chart -- Task 4 needs to know this before its
-    # clean-room `make kind-verify` run, and either relax that assertion
-    # (e.g. to a subset check) or find a different mechanism. tpch/tpcds
-    # are inert synthetic connectors (no S3/DB backend, no credentials, no
-    # data) -- a correctness/gate concern, not a security one.
+    # Consequence: only a bare, no-`-f` render carries `tpch`/`tpcds` into
+    # trino-catalog's ConfigMap. Every render this repo actually performs
+    # (prod's `-f values.yaml` [+ values-lake.yaml once G2 closes], kind's
+    # `-f values.yaml -f values-kind.yaml`) renders `landing`(+`lake` on
+    # kind)/`system` only -- no demo catalogs, matching the intent above.
+    # hack/kind-verify.sh's SHOW CATALOGS gate uses an allowlist admitting
+    # tpch/tpcds/system as harmless extras rather than asserting an exact
+    # set, insurance against this mechanism rather than evidence they are
+    # expected to appear (see that script's own comment for its gate's
+    # scope).
     tpch: null
     tpcds: null
