@@ -7,34 +7,61 @@
 # actually tested for real"). hack/kind-up.sh labels the kind worker node
 # `pool=db` -- this override makes both CNPG clusters actually schedule
 # via that real nodeSelector match instead of a values-neutralised no-op.
-# Tolerations are `null`, NOT `[]` and NOT copied from values.yaml's
-# `dedicated=database:NoSchedule`: kind's single worker carries the LABEL
-# but not the TAINT (a 2-node kind cluster -- control-plane + one worker --
-# has nowhere else for the operators/compute/orchestration workloads to
-# run if that single worker were tainted; see task-4-report.md for the
-# full reasoning). `null`, not `[]`, is load-bearing here -- LIVE FINDING
-# (Task 4 clean-room): an explicit empty list renders `tolerations: []` in
-# the Cluster CR, a real non-nil empty slice server-side, which is NOT the
-# same as the field being absent -- CNPG's own reconciler compares the
-# LIVE pod's tolerations (every pod gets `node.kubernetes.io/{not-ready,
-# unreachable}:NoExecute` auto-injected by the API server's
-# DefaultTolerationSeconds admission plugin, tolerationSeconds: 300,
-# regardless of what the pod spec itself declared) against this "desired"
-# empty list, sees a permanent mismatch ("original and target PodSpec
-# differ in tolerations" -- kubectl -n cnpg-system logs deploy/
-# cloudnative-pg), and recreates the instance pod forever: the new pod
-# gets the same 2 admission-injected tolerations, the diff never
-# resolves. Reproduced live: both mon-data and lakekeeper-db stuck
-# "Waiting for the instances to become active" indefinitely with
-# `tolerations: []`, immediately reaching "Cluster in healthy state" once
-# patched to `tolerations: null` -- `null` unmarshals server-side to a nil
-# slice, indistinguishable from the key being omitted entirely, which is
-# what actually lets CNPG's own defaulting treat "no custom tolerations"
-# correctly instead of fighting the admission-injected ones.
+#
+# Tolerations explicitly list the SAME two tolerations Kubernetes itself
+# auto-injects into every pod (the API server's DefaultTolerationSeconds
+# admission plugin adds `node.kubernetes.io/{not-ready,unreachable}:
+# NoExecute`, tolerationSeconds: 300, regardless of what the pod spec
+# itself declares) -- NOT `[]`, NOT `null`, both tried and rejected during
+# the Task 4 clean-room, in that order:
+#   1. `[]` (an explicit, real, non-nil empty list): CNPG's own
+#      reconciler compares this "desired" empty list against the LIVE
+#      pod's tolerations (which always has the 2 admission-injected
+#      entries), sees a permanent mismatch ("original and target PodSpec
+#      differ in tolerations" -- kubectl -n cnpg-system logs deploy/
+#      cloudnative-pg), and recreates the instance pod forever: the new
+#      pod gets the same 2 admission-injected tolerations, the diff never
+#      resolves. Reproduced live: both mon-data and lakekeeper-db stuck
+#      "Waiting for the instances to become active" indefinitely.
+#   2. `null`: renders as literal YAML `null` (Helm's `toYaml` on a Go
+#      nil value); a `kubectl patch --type=json` with a null value DOES
+#      get pruned to "field absent" server-side and looked like a fix in
+#      an interactive test -- but ArgoCD syncs via Server-Side Apply
+#      (`syncOptions: [ServerSideApply=true]`), and SSA validates the
+#      literal submitted manifest against the CRD's structural schema
+#      BEFORE any null-pruning: reproduced live via `kubectl apply
+#      --server-side`, a flat rejection -- "spec.affinity.tolerations:
+#      Invalid value: \"null\": ... must be of type array" -- so ArgoCD's
+#      sync for this resource fails outright and the live object never
+#      actually changes; kind-verify's clean-room run would just hang on
+#      this Application forever.
+# Matching the live-injected pair exactly is schema-valid (a real,
+# non-empty array, so SSA accepts it) and gives CNPG's reconciler a
+# "desired" set that already equals "live" -- reproduced live: one
+# instance restart (to adopt the new declared tolerations) then stays
+# "Cluster in healthy state" for both mon-data and lakekeeper-db, no
+# further loop. A real `dedicated=database:NoSchedule` toleration
+# (matching prod's, values.yaml) was also tested live and stabilizes the
+# same way (restart once, then healthy) -- confirming the loop is
+# specific to the EMPTY-list case, not tolerations in general; prod's
+# real (non-empty) config is not at risk of this bug. Not copied from
+# values.yaml's `dedicated=database:NoSchedule` regardless: kind's single
+# worker carries the pool=db LABEL but not that TAINT (a 2-node kind
+# cluster -- control-plane + one worker -- has nowhere else for the
+# operators/compute/orchestration workloads to run if that single worker
+# were tainted; see task-4-report.md for the full reasoning).
 placement:
   nodeSelector:
     pool: db
-  tolerations: null
+  tolerations:
+    - key: node.kubernetes.io/not-ready
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
+    - key: node.kubernetes.io/unreachable
+      operator: Exists
+      effect: NoExecute
+      tolerationSeconds: 300
 
 # Lakekeeper's catalog.nodeSelector/tolerations duplicate the
 # top-level `placement:` block by hand (values.yaml's own comment:
@@ -42,14 +69,21 @@ placement:
 # override, same reasoning as `placement:` above. This one is a plain
 # apps/v1 Deployment (+ a one-shot db-migration Job), not a CNPG Cluster,
 # so the live infinite-recreate-loop bug above does not actually apply to
-# it -- `null` kept here anyway for consistency with `placement:` and
-# because there is no upside to `[]` once its one real justification
-# (matching the CNPG live finding) is understood.
+# it, but the same explicit list is used for consistency (and because a
+# Deployment doesn't care either way).
 lakekeeper:
   catalog:
     nodeSelector:
       pool: db
-    tolerations: null
+    tolerations:
+      - key: node.kubernetes.io/not-ready
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 300
+      - key: node.kubernetes.io/unreachable
+        operator: Exists
+        effect: NoExecute
+        tolerationSeconds: 300
 
 # Restored (Task 4) from the pre-split chart/values-kind.yaml (git history:
 # commit 1466141^): a single small instance keeps kind's landing DB cheap.
