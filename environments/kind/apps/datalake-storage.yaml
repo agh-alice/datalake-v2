@@ -13,20 +13,40 @@
 # Application's first sync (same reasoning as that script's existing
 # lakekeeper/minio/dex/monitoring namespace pre-creation).
 #
-# destination.namespace IS set (live finding, Task 4 clean-room): every
-# hand-authored template in this chart hardcodes its own `metadata.
-# namespace: datalake-storage` (Task 1's convention), so it didn't matter
-# for the old single-umbrella Application -- but Lakekeeper is now a
-# chart DEPENDENCY (Task 2), and its upstream templates rely on normal
-# Helm release-namespace semantics for objects that don't self-declare
-# one (e.g. templates/db-migration.yaml's Job). With destination.namespace
-# left unset, ArgoCD's hydrator rendered that Job into namespace `argocd`
-# (this Application's OWN namespace) instead of `datalake-storage` --
-# reproduced live: `kubectl -n argocd get application datalake-storage`
-# tracked `lakekeeper-db-migration-1` as a resource in namespace `argocd`
-# with `requiresPruning: true`. Explicit destination.namespace is what
-# Helm's `--namespace`/`.Release.Namespace` actually resolves to at
-# render time.
+# destination.namespace IS set, AND sourceHydrator.drySource.helm.namespace
+# is ALSO set explicitly (two live findings, Task 4 clean-room, same root
+# cause): every hand-authored template in this chart hardcodes its own
+# `metadata.namespace: datalake-storage` (Task 1's convention), so it
+# didn't matter for the old single-umbrella Application -- but Lakekeeper
+# is now a chart DEPENDENCY (Task 2), and its upstream templates rely on
+# normal Helm release-namespace semantics for objects that don't
+# self-declare one (e.g. templates/db-migration.yaml's Job, `namespace:
+# {{ .Release.Namespace }}`).
+#
+# destination.namespace alone was NOT enough: the Application CRD's own
+# schema says `sourceHydrator.drySource.helm.namespace` "defaults to the
+# app's destination namespace" when left empty -- but live-verified
+# (Task 4, ArgoCD chart 10.1.3 / appVersion v3.5.0-rc2) that default
+# fallback does NOT work: the hydrator's own committed hydrator.metadata
+# showed the exact command (`helm template . --name-template
+# datalake-storage --values ... --include-crds`, no visible --namespace)
+# and the resulting manifest.yaml had `namespace: argocd` baked into the
+# Job -- this Application's OWN metadata.namespace, not
+# destination.namespace, even after destination.namespace was set and
+# re-applied. destination.namespace is still correct/needed (it is what
+# governs where `kubectl apply` targets resources that DO lack a
+# namespace at sync time) but is a DIFFERENT knob from what `helm
+# template`'s `.Release.Namespace` resolves to during hydration -- this
+# repo is on the Source Hydrator's rc2/beta channel (environments/kind/
+# argocd-values.yaml's own comment), and the documented default-fallback
+# behavior between the two evidently isn't implemented/working yet at
+# this version. Setting `helm.namespace` explicitly bypasses whatever gap
+# that is. Reproduced live before this fix: `kubectl -n argocd get
+# application datalake-storage` tracked `lakekeeper-db-migration-1` as a
+# resource in namespace `argocd` with `requiresPruning: true`, and
+# ArgoCD's sync operation hung forever waiting for that hook Job (whose
+# pod couldn't even start -- it references Secrets that live in
+# `datalake-storage`, not `argocd`) to complete.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -41,6 +61,7 @@ spec:
       path: envs/prod/storage
       helm:
         valueFiles: [values.yaml, values-kind.yaml]
+        namespace: datalake-storage
     syncSource:
       targetBranch: environments/kind
       path: envs/prod/storage

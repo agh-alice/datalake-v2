@@ -1,10 +1,10 @@
 # Plan 5 Task 4 -- see datalake-storage.yaml's header comment for the
 # shared rationale (tier-mirroring Application, no CreateNamespace=true,
-# same reasons) and its destination.namespace comment (this chart has no
-# dependencies today, all hand-authored templates self-declare their
-# namespace -- set anyway for consistency with the other two tiers and as
-# a forward guard against the same class of bug if a dependency is ever
-# added here).
+# same reasons) and its destination.namespace + sourceHydrator.drySource.
+# helm.namespace comment (this chart has no dependencies today, all
+# hand-authored templates self-declare their namespace -- both set anyway
+# for consistency with the other two tiers and as a forward guard against
+# the same class of bug if a dependency is ever added here).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -19,6 +19,7 @@ spec:
       path: envs/prod/orchestration
       helm:
         valueFiles: [values.yaml, values-kind.yaml]
+        namespace: datalake-orchestration
     syncSource:
       targetBranch: environments/kind
       path: envs/prod/orchestration

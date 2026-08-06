@@ -1,8 +1,11 @@
 # Plan 5 Task 4 -- see datalake-storage.yaml's header comment for the
 # shared rationale (tier-mirroring Application, no CreateNamespace=true,
-# same reasons) and its destination.namespace comment (live finding:
-# Trino is a chart dependency too, Task 2 -- any of its upstream
-# templates that don't self-declare a namespace need this set correctly).
+# same reasons) and its destination.namespace + sourceHydrator.drySource.
+# helm.namespace comment (live finding: Trino is a chart dependency too,
+# Task 2 -- any of its upstream templates that don't self-declare a
+# namespace need this set correctly; destination.namespace alone was NOT
+# enough -- the Source Hydrator's documented "defaults to the app's
+# destination namespace" fallback does not work on this ArgoCD version).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -17,6 +20,7 @@ spec:
       path: envs/prod/compute
       helm:
         valueFiles: [values.yaml, values-kind.yaml]
+        namespace: datalake-compute
     syncSource:
       targetBranch: environments/kind
       path: envs/prod/compute
