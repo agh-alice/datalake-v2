@@ -3,3 +3,28 @@ name: datalake-compute
 description: "ALICE datalake v2 -- compute tier (Trino query engine, arrives as a chart dependency in Plan 5 Task 2). Renders into namespace datalake-compute on the platform-managed alice-k8s-datalake cluster (Plan 5 tenant port)."
 type: application
 version: 0.1.0
+# NOTE: `helm template envs/prod/compute` (and anything that calls it --
+# hack/check-seam.sh, kubeconform, the Task 5 CI gate, ArgoCD's own sync)
+# requires `helm dependency build envs/prod/compute` to have been run
+# first. Chart.lock is committed (vendored, exact pin); the fetched
+# charts/*.tgz is gitignored and NOT committed -- verified the same way as
+# envs/prod/storage/Chart.yaml's identical note. Any CI/ArgoCD pipeline
+# consuming this chart must run `helm dependency build` (or `helm
+# dependency update`) before templating it.
+dependencies:
+  # Plan 5 Task 2: Trino absorbed as a chart dependency, replacing the
+  # retired apps/infra/trino.yaml standalone ArgoCD Application (same
+  # AppProject-shape reason as datalake-storage's lakekeeper dependency).
+  # Newest stable, NOT the 1.40.0/476 pin the old Application carried --
+  # verified 2026-08-06 via `helm repo add trino https://trinodb.github.io/
+  # charts && helm search repo trino/trino --versions`: 1.42.2 (appVersion
+  # 480) is newest. The 476 pin was forced by the kind test host's CPU
+  # lacking AVX2 (RHEL10-based ubi10-micro runtime image, appVersion >=477,
+  # requires x86-64-v3) -- this repo's prod compute nodes are x86-64-v3
+  # (ccs1.large, per this plan's Context line), so that constraint does not
+  # apply here; the AVX2/x86-64-v3 nodeSelector itself is Task 3's job
+  # (Global Constraints: placement is a Task 3 concern), this dependency
+  # pin just stops inheriting the kind-only downgrade.
+  - name: trino
+    version: "1.42.2"
+    repository: https://trinodb.github.io/charts

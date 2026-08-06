@@ -3,3 +3,25 @@ name: datalake-storage
 description: "ALICE datalake v2 -- storage tier (landing DB, Lakekeeper catalog DB). Renders into namespace datalake-storage on the platform-managed alice-k8s-datalake cluster (Plan 5 tenant port)."
 type: application
 version: 0.1.0
+# NOTE: `helm template envs/prod/storage` (and anything that calls it --
+# hack/check-seam.sh, kubeconform, the Task 5 CI gate, ArgoCD's own sync)
+# requires `helm dependency build envs/prod/storage` to have been run
+# first. Chart.lock is committed (vendored, exact pin); the fetched
+# charts/*.tgz is gitignored and NOT committed -- verified: a fresh clone
+# with charts/ absent fails `helm template` with "found in Chart.yaml, but
+# missing in charts/ directory". Any CI/ArgoCD pipeline consuming this
+# chart must run `helm dependency build` (or `helm dependency update`)
+# before templating it.
+dependencies:
+  # Plan 5 Task 2: Lakekeeper absorbed as a chart dependency, replacing the
+  # retired apps/infra/lakekeeper.yaml standalone ArgoCD Application (the
+  # tenant AppProject's clusterResourceWhitelist: [] and three-Application
+  # shape no longer allow third-party charts as their own Applications).
+  # Newest stable -- verified 2026-08-06 via `helm repo add lakekeeper
+  # https://lakekeeper.github.io/lakekeeper-charts/ && helm search repo
+  # lakekeeper/lakekeeper --versions`: 0.11.0 (appVersion 0.12.2) is newest,
+  # same chart version the retired Application already pinned (Plan 3) --
+  # no upstream version change here, only the vendoring mechanism.
+  - name: lakekeeper
+    version: "0.11.0"
+    repository: https://lakekeeper.github.io/lakekeeper-charts/

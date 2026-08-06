@@ -1,5 +1,213 @@
-# compute tier -- Plan 5 Task 1: no values yet. This chart has no authored
-# templates of its own (see templates/_helpers.tpl); Trino arrives as a
-# chart dependency in Plan 5 Task 2, which is where this file gains real
-# content (Trino's own values block, x86-64-v3 nodeSelector, the Iceberg
-# REST catalog pointed at Lakekeeper's in-cluster service).
+# compute tier -- Plan 5 Task 1 skeleton, populated in Task 2: Trino
+# absorbed as a chart dependency, replacing the retired
+# apps/infra/trino.yaml Application. Everything under the `trino:` key
+# below is the trino subchart's own root values (Chart.yaml's
+# `dependencies:` entry, no alias -- dependency name IS the values key).
+#
+# Step-1 verify-first finding (2026-08-06, chart 1.42.2, both the plain
+# `helm template` default render AND this ported-values render,
+# `--include-crds`): no cluster-scoped kind anywhere in the output
+# (ConfigMap, Deployment, Pod [helm-test hook], Service only -- no worker
+# Deployment/ConfigMap either, see server.workers below). Checked the
+# chart's values.yaml for conditionally-cluster-scoped features too:
+# server.keda.* (ScaledObject CRD -- a CRD *instance*, not a CRD
+# definition, still would be a KEDA-CRD-backed custom resource, but
+# server.keda.enabled defaults false and is left false here, so
+# templates/keda-scaledobject.yaml never renders) and networkPolicy.enabled
+# (defaults false, namespaced kind anyway, not in check-seam.sh's list even
+# if enabled). priorityClassName fields only *reference* an existing
+# PriorityClass by name; this chart never creates one. Namespace-only
+# confirmed; Step 1 does not block this chart.
+trino:
+  # fullnameOverride pins the in-cluster Service name to a short,
+  # predictable "trino" regardless of whatever Helm release name Task 4/5
+  # end up giving this whole compute chart -- same reasoning and same
+  # "<release>-trino" fallback risk as
+  # envs/prod/storage/values.yaml's lakekeeper.fullnameOverride comment.
+  # envs/prod/orchestration/values.yaml's ingest-env contract doc already
+  # assumes trino.datalake-compute.svc:8080 (chart's default
+  # service.port, unchanged here).
+  fullnameOverride: trino
+
+  # Digest-pinned per the E2 founding lesson (design doc E2: a mutable-tag
+  # image + broken git-sync caused gen-1's silent deployment drift) --
+  # overrides image.tag (chart 1.42.2's default `image.tag: ""` resolves to
+  # Chart.AppVersion, i.e. "480", but the digest pin below is what's
+  # actually used). Resolved two ways, both agreeing (2026-08-06):
+  # `docker buildx imagetools inspect trinodb/trino:480` (`Digest:` field,
+  # multi-arch manifest-list digest) and the Docker Hub registry v2 API
+  # directly (anonymous pull token, `GET /v2/trinodb/trino/manifests/480`
+  # with an `application/vnd.docker.distribution.manifest.list.v2+json`
+  # Accept header -> `docker-content-digest` response header).
+  #
+  # NOT the 476 pin the retired Application carried: that was forced by the
+  # kind test host's CPU lacking AVX2 -- appVersions 477-480 switched the
+  # image's runtime base from `redhat/ubi9-micro` to `redhat/ubi10-micro`,
+  # which raised the minimum microarchitecture to x86-64-v3. This repo's
+  # prod compute nodes are x86-64-v3 (ccs1.large, per Plan 5's Context
+  # line), so 480 is the right pin here; the corresponding nodeSelector is
+  # Task 3's job (Global Constraints: placement), not repeated here.
+  image:
+    digest: "sha256:1565e8cac299a32dd9177a4da2d748da4ceb9f1560a9c409d1d18fd72ea5253e"
+
+  # Coordinator-only topology, ported from the retired Application.
+  # `server.workers: 0` is not merely "zero replicas" -- re-verified
+  # against the PULLED 1.42.2 chart's own templates (not assumed from the
+  # 476-pin comment): templates/deployment-worker.yaml and
+  # configmap-worker.yaml are both wrapped in
+  # `{{- if or .Values.server.keda.enabled (gt (int .Values.server.workers) 0) }}`,
+  # unchanged shape from 1.40.0, so 0 (keda left at its default false)
+  # still renders no worker Deployment/ConfigMap at all.
+  server:
+    workers: 0
+
+  coordinator:
+    config:
+      # Load-bearing for coordinator-only mode, re-verified against the
+      # pulled 1.42.2 chart the same way: without this the coordinator
+      # refuses to schedule query fragments anywhere (chart default
+      # assumes dedicated workers exist) and every query hangs.
+      # templates/configmap-coordinator.yaml still renders
+      # `node-scheduler.include-coordinator=
+      # {{ .Values.coordinator.config.nodeScheduler.includeCoordinator }}`,
+      # same property name as 1.40.0.
+      nodeScheduler:
+        includeCoordinator: true
+    # jvm.maxHeapSize / resources.requests+limits deliberately NOT set
+    # here (chart default is `jvm.maxHeapSize: "8G"`, `resources: {}`) --
+    # both are Task 3's job (Global Constraints: every container gets CPU
+    # + memory requests, "sized from measurement, not guesswork"; heap
+    # sizing is paired with the memory limit Task 3 picks, not a Task 2
+    # decision). The chart also offers `jvm.maxHeapPercent` as an
+    # alternative tied automatically to the container memory limit --
+    # worth Task 3 considering instead of a hardcoded maxHeapSize.
+
+  # Injects the `landing` catalog's PostgreSQL credentials as env vars
+  # (LANDING_RO_USER/LANDING_RO_PASSWORD) on the coordinator pod, ported
+  # unchanged from the retired Application. Secret `landing-ro` (namespace
+  # datalake-compute) -- Task 3 wires the ExternalSecret that materializes
+  # it (Global Constraints: secrets via the platform's ClusterSecretStore,
+  # no plaintext in Git); this task only keeps the mechanism and the
+  # secret name.
+  envFrom:
+    - secretRef:
+        name: landing-ro
+
+  # Catalog property names re-verified against the PINNED chart/Trino
+  # version's OWN docs (480, not /current/ and not memory) -- the
+  # version-exactness lesson the retired Application's comment already
+  # flagged (476 needed `fs.native-s3.enabled`, not `fs.s3.enabled`,
+  # against 476's own versioned docs):
+  #   https://trino.io/docs/480/object-storage/metastores.html --
+  #     REST catalog property table confirms iceberg.rest-catalog.uri,
+  #     .warehouse, .security, .oauth2.token, .vended-credentials-enabled
+  #     unchanged from 476.
+  #   https://trino.io/docs/480/object-storage/file-system-s3.html --
+  #     fs.native-s3.enabled, s3.endpoint, s3.region, s3.path-style-access
+  #     ALL confirmed unchanged at 480 (the rename to fs.s3.enabled that
+  #     476's comment warned would eventually happen has NOT landed by
+  #     480 -- checked directly against 480's own docs, not assumed).
+  #   https://trino.io/docs/480/connector/postgresql.html --
+  #     connector.name=postgresql, connection-url, connection-user,
+  #     connection-password unchanged.
+  #   https://trino.io/docs/480/security/secrets.html --
+  #     `${ENV:VAR}` substitution in catalog properties files confirmed
+  #     unchanged, no extra config flag.
+  catalogs:
+    # Iceberg REST catalog -> Lakekeeper's in-cluster service, namespace
+    # retargeted from the old `lakekeeper.lakekeeper.svc` to
+    # `lakekeeper.datalake-storage.svc` (Plan 5 Task 1's namespace merge;
+    # `lakekeeper` short name comes from this chart's own
+    # `lakekeeper.fullnameOverride`, envs/prod/storage/values.yaml).
+    # warehouse `default`, OAUTH2 + a static `dummy` token, and
+    # vended-credentials-enabled=true are all UNCHANGED from the retired
+    # Application (Lakekeeper's open-auth mode accepts any bearer token;
+    # not a real secret, same convention hack/lakekeeper-warehouse.sh
+    # already uses) -- porting values, not redesigning auth (flagged in
+    # task-2-report.md for the controller, same as the storage tier's
+    # lakekeeper auth note).
+    #
+    # s3.endpoint / s3.region / s3.path-style-access: prod uses EXTERNAL
+    # Cyfronet S3, not the kind MinIO stand-in
+    # (http://minio.minio.svc:9000, region local-01) the retired
+    # Application pointed at -- but the real Cyfronet S3 endpoint/region
+    # and its path-style-vs-virtual-hosted addressing ("storage-profile
+    # flavor") are not yet known (CLAUDE.md open items: "Cyfronet S3
+    # credentials pending"; Plan 4 gate G2: "flavor TO-VERIFY against real
+    # S3 -- s3-compat vs aws"). Vended STS credentials mean Trino never
+    # holds a static S3 access/secret key here (same as kind) -- only
+    # these three connection-shape properties are unresolved.
+    #
+    # IMPORTANT, unlike envs/prod/orchestration/values.yaml's ingest-env
+    # placeholders (which live inside a comment block and never render):
+    # the `<cyfronet-s3-endpoint>`/`<cyfronet-s3-region>` strings below ARE
+    # live values -- they render straight into the trino-catalog ConfigMap
+    # the coordinator reads at startup. This chart is therefore NOT
+    # syncable to prod as committed: a real sync would have Trino try to
+    # resolve the literal string `<cyfronet-s3-endpoint>` as an S3 host and
+    # fail loudly on every `lake.*` query. That is the deliberate choice
+    # over omitting the properties, which would leave
+    # `fs.native-s3.enabled=true` with no endpoint override and silently
+    # default to AWS instead of failing closed. Replace both values when
+    # Plan 4 gate G2 closes -- out of this task's scope, but explicitly
+    # NOT a cosmetic placeholder like the orchestration precedent; flagged
+    # in task-2-report.md for the controller.
+    lake: |
+      connector.name=iceberg
+      iceberg.catalog.type=rest
+      iceberg.rest-catalog.uri=http://lakekeeper.datalake-storage.svc:8181/catalog
+      iceberg.rest-catalog.warehouse=default
+      iceberg.rest-catalog.security=OAUTH2
+      iceberg.rest-catalog.oauth2.token=dummy
+      iceberg.rest-catalog.vended-credentials-enabled=true
+      fs.native-s3.enabled=true
+      s3.endpoint=<cyfronet-s3-endpoint>
+      s3.region=<cyfronet-s3-region>
+      s3.path-style-access=true
+    # PostgreSQL federation -> the CNPG landing cluster `mon-data`
+    # (envs/prod/storage/templates/landing-db.yaml), namespace retargeted
+    # from `mon-data-rw.landing-db.svc` to `mon-data-rw.datalake-storage.svc`
+    # (Plan 5 Task 1's namespace merge). Read-only role `trino_ro` --
+    # provisioning mechanism (hack/kind-up.sh on kind; an ExternalSecret +
+    # a one-time role-creation step on the prod tenant cluster) is Task 3's
+    # job, unchanged here. `${ENV:...}` is Trino's own secrets-substitution
+    # syntax (re-verified above against 480's docs), resolved from the
+    # envFrom-injected LANDING_RO_USER/LANDING_RO_PASSWORD env vars at
+    # property-load time -- no plaintext password in this file.
+    landing: |
+      connector.name=postgresql
+      connection-url=jdbc:postgresql://mon-data-rw.datalake-storage.svc:5432/mon_data
+      connection-user=${ENV:LANDING_RO_USER}
+      connection-password=${ENV:LANDING_RO_PASSWORD}
+    # Intent: remove the chart's default demo catalogs (tpch, tpcds).
+    # DOES NOT CURRENTLY WORK -- documented here anyway so the intent
+    # survives if this gets fixed upstream or worked around later.
+    #
+    # Null-deletes-a-parent-default-map-key is real, documented Helm
+    # behavior, but ONLY when values are supplied to a chart directly
+    # (`helm template <chart> -f values.yaml`, confirmed working standalone
+    # against this exact chart+version during Step 1 verification). It
+    # does NOT propagate through the `dependencies:` values-passing path
+    # this task uses -- confirmed empirically (rendered ConfigMap still
+    # carries tpch.properties/tpcds.properties with these nulls in place)
+    # and matches a long-standing, still-open upstream Helm limitation:
+    # helm/helm#9027, #9136, #5184, #3117 (nested/subchart null values
+    # silently fail to delete a dependency chart's default map keys, only
+    # the top-level chart's own values.yaml honors the deletion). No clean
+    # workaround exists within Helm's values model alone -- a post-renderer
+    # would fix `helm template` locally but ArgoCD's native Helm source
+    # cannot invoke one, so local render and real sync would diverge; not
+    # attempted for that reason (see task-2-report.md).
+    #
+    # Consequence: `lake`/`landing`/`tpch`/`tpcds`/`system` ALL render into
+    # trino-catalog's ConfigMap as committed. This breaks
+    # hack/kind-verify.sh's SHOW CATALOGS hard gate (`catalogs !=
+    # ["lake", "landing", "system"]` -> exit 1) once Task 4 rewires the
+    # kind harness onto this dependency-based chart -- Task 4 needs to
+    # know this before its clean-room `make kind-verify` run, and either
+    # relax that assertion (e.g. to a subset check) or find a different
+    # mechanism. tpch/tpcds are inert synthetic connectors (no S3/DB
+    # backend, no credentials, no data) -- a correctness/gate concern, not
+    # a security one.
+    tpch: null
+    tpcds: null

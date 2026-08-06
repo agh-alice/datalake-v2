@@ -32,3 +32,80 @@ landingDb:
 # (lakekeeper-db.yaml is retargeted there, same as landing-db.yaml) --
 # whatever provisions it (hack/kind-up.sh, or the Task 3 ExternalSecret)
 # must follow.
+
+# ---------------------------------------------------------------------
+# Lakekeeper (Plan 5 Task 2) -- values ported from the retired
+# apps/infra/lakekeeper.yaml Application (Plan 3/4), minus everything
+# kind-specific. Everything under this `lakekeeper:` key becomes the
+# lakekeeper subchart's own root values (Chart.yaml's `dependencies:`
+# entry, no alias -- the dependency name IS the values key, standard Helm
+# subchart-values scoping).
+lakekeeper:
+  # fullnameOverride pins the in-cluster Service/ServiceAccount/Role name
+  # to a short, predictable "lakekeeper" regardless of whatever Helm
+  # release name Task 4/5 end up giving this whole storage chart when
+  # ArgoCD syncs it. Without this, the chart's own fullname helper
+  # (templates/_helpers.tpl: "if release name contains chart name, use
+  # release name, else `<release>-<chartname>`") would produce
+  # "<release>-lakekeeper" once Lakekeeper is a dependency of a
+  # differently-named parent release, breaking the DNS name Trino's `lake`
+  # catalog (envs/prod/compute/values.yaml) and
+  # envs/prod/orchestration/values.yaml's ingest-env contract doc both
+  # already assume: lakekeeper.datalake-storage.svc:8181. Verified against
+  # the pulled chart (2026-08-06): templates/service.yaml names the
+  # Service via the same `iceberg-catalog.fullname` helper this overrides.
+  fullnameOverride: lakekeeper
+
+  # Bundled `groundhog2k/postgres` subchart disabled; DB config uses
+  # discrete host/port/database (plain values; not sensitive) plus
+  # user/password sourced from the CNPG secret `lakekeeper-db-app`
+  # (envs/prod/storage/templates/lakekeeper-db.yaml's Cluster `lakekeeper-db`,
+  # CNPG's default `<cluster-name>-app` Secret naming). Namespace retargeted
+  # from the old Application's `lakekeeper-db-rw.lakekeeper.svc` to
+  # `datalake-storage` (Plan 5 Task 1's namespace merge) -- otherwise
+  # byte-identical to the retired Application's values.
+  postgresql:
+    enabled: false
+  externalDatabase:
+    type: postgres
+    host_read: lakekeeper-db-rw.datalake-storage.svc
+    host_write: lakekeeper-db-rw.datalake-storage.svc
+    port: 5432
+    database: lakekeeper
+    userSecret: lakekeeper-db-app
+    userSecretKey: username
+    passwordSecret: lakekeeper-db-app
+    passwordSecretKey: password
+
+  # secretBackend.type defaults to "Postgres" (Lakekeeper's internal secret
+  # store, distinct from the catalog DB above). encryptionKeySecret points
+  # at Secret datalake-storage/lakekeeper-pg-encryption (see this file's
+  # comment above `lakekeeperDb:` -- provisioned out-of-band, never
+  # templated here, same as the retired Application's approach and for the
+  # same reason: the chart's own helm-`lookup`-based auto-generation is
+  # incompatible with GitOps rendering, argoproj/argo-cd#5202).
+  secretBackend:
+    postgres:
+      encryptionKeySecret: lakekeeper-pg-encryption
+      encryptionKeySecretKey: encryptionKey
+
+  # authz.backend (default "allowall") and auth.oauth2/auth.k8s (both
+  # unset/disabled by default) are UNCHANGED from the retired Application,
+  # which never overrode them -- Lakekeeper runs with no real
+  # authentication/authorization in prod today, same as kind. Not this
+  # task's scope to harden (Task 2 ports existing values; it does not
+  # redesign security posture) -- flagged in task-2-report.md for the
+  # controller.
+  #
+  # Step-1 verify-first finding (2026-08-06, chart 0.11.0, both the plain
+  # `helm template` default render AND this ported-values render,
+  # `--include-crds`): no cluster-scoped kind anywhere in the output
+  # (Deployment, Job, Pod [helm-test hook], Role, RoleBinding, Secret,
+  # Service, ServiceAccount only -- Role/RoleBinding are namespaced, not
+  # ClusterRole/ClusterRoleBinding). The bundled postgres subchart's
+  # StatefulSet only appears when postgresql.enabled defaults true; with it
+  # disabled here (as above) it doesn't render at all. auth.k8s.enabled
+  # defaults false, so auth.k8s.createClusterRoleBinding's ClusterRoleBinding
+  # never renders either -- confirmed by inspecting the chart's own
+  # values.yaml comment for that field, not just the empty-diff render.
+  # Namespace-only confirmed; Step 1 does not block this chart.
