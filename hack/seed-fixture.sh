@@ -85,11 +85,49 @@ cd "$(dirname "$0")/.."
 # PG fixture tables dropped before rerunning this script so CREATE TABLE
 # actually re-lays-out the production-parity schema.
 #
+# LAKE-SIDE EQUIVALENT of the caveat above (Plan 5 Task 4 finish, live-
+# caught 2026-08-06): re-seeding alone does NOT make an already-ingested
+# mon_jdls's new/changed JDL fields show up in `lake.alice.mon_jdls_parsed`.
+# `pipeline.py`'s mon_jdls resource uses `job_id` itself as the dlt
+# incremental cursor (merge/upsert on primary_key="job_id") -- this
+# fixture's job_ids are always the deterministic 1..1000, so on a cluster
+# that has already ingested once, the cursor sits at 1000 and a plain rerun
+# of `run-nightly` sees no job_id above it and loads NOTHING, no matter how
+# the JSON body of those same 1000 rows changed. Any time this fixture's
+# JDL field set changes (this script, or hack/jdl_fixture_fields.py's
+# output, or contract_columns.py upstream), run `hack/reset-pipeline.sh
+# --yes` FIRST to wipe the Iceberg tables + dlt's own S3-side bookkeeping,
+# THEN reseed, THEN ingest -- a fresh `make kind-up` has no watermark yet
+# and does not need this. Reasoned from pipeline.py's `primary_key="job_id"`
+# + `dlt.sources.incremental("job_id", ...)` (not separately reproduced by
+# deliberately skipping the reset step -- this fix's own verification run
+# always did reset-then-reseed-then-ingest, per docs/runbooks/ingestion-
+# pipeline.md's "Reset procedure"); skipping the reset risks silently
+# leaving apply-views failing on the exact subtractive-drift gate this
+# fixture enrichment exists to close (module docstring below).
+#
 # Namespace `datalake-storage` (Plan 5 Task 1 retargeted mon-data out of
 # the old umbrella chart's dedicated `landing-db` namespace into the
 # merged storage-tier namespace; Task 4 updated this script to follow).
+#
+# JDL field coverage (Plan 5 Task 4 finish -- apply-views was aborting with
+# "mapped columns missing from live schema in lake.alice.mon_jdls_parsed":
+# contract_columns.py's mapping was regenerated against ~147k REAL
+# production JDLs (research/2026-07-13_production-data-dress-rehearsal.md)
+# and now references 65 mapped + 38 real-passthrough jdl__ columns, but this
+# fixture's JDL blob only ever grew the original 12 fixture-era fields, so
+# most of those columns never existed live -- the subtractive-drift gate
+# doing exactly its job, module docstring's "SUBTRACTIVE" case). Rather than
+# hand-list the other 90 fields here (guaranteed to drift the next time
+# contract_columns.py is regenerated), hack/jdl_fixture_fields.py derives
+# them PROGRAMMATICALLY, straight from that module's own dicts, every seed
+# run -- see that script's docstring for the full derivation (source-key
+# spelling verified against the pinned dlt==1.28.2 normalizer) and why the
+# two HardBins/MasterResubmitThreshold fields are deliberately left out.
+EXTRA_JDL_FIELDS=$(python3 "$(dirname "$0")/jdl_fixture_fields.py")
+
 MD_PRIMARY=$(kubectl -n datalake-storage get cluster mon-data -o jsonpath='{.status.currentPrimary}')
-kubectl -n datalake-storage exec -i "$MD_PRIMARY" -- psql -U postgres -d mon_data -v ON_ERROR_STOP=1 <<'SQL'
+kubectl -n datalake-storage exec -i "$MD_PRIMARY" -- psql -U postgres -d mon_data -v ON_ERROR_STOP=1 <<SQL
 SELECT setseed(0.42);
 
 CREATE TABLE IF NOT EXISTS job_info (
@@ -181,7 +219,11 @@ FROM (
 -- never drop the row). All others alternate LPMPassName (even job_id) /
 -- LPMPASSNAME (odd job_id) casing per the contract's documented defect;
 -- jdl.py's LPM-casing coalesce (design spec section 4) merges both into the
--- canonical `LPMPassName` key at parse time.
+-- canonical LPMPassName key at parse time. (No backticks and no literal
+-- dollar-brace-name text in this heredoc -- it is now UNQUOTED so bash
+-- expands both inside SQL comments too, not just SQL code; a backtick pair
+-- would be command-substituted before psql ever sees it, same gotcha
+-- hack/kind-verify.sh's trino-query-probe heredoc documents.)
 INSERT INTO mon_jdls (job_id, lpmjobtypeid, full_jdl)
 SELECT
   gs,
@@ -189,7 +231,11 @@ SELECT
   CASE
     WHEN gs = 501 THEN '{"TTL": "3600", "CPUCores": not valid json here'
     WHEN gs = 502 THEN '{"TTL": "1800", "CPUCores": "2", "Executable": "/alice/bin/aliroot"'
-    ELSE jsonb_build_object(
+    -- Hand-authored core (12 fields incl. the LPM split-casing pair) ||
+    -- the 90 auto-derived fields from hack/jdl_fixture_fields.py (module
+    -- comment above, "JDL field coverage") = 102 total top-level JDL keys,
+    -- matching the dress rehearsal's live production census exactly.
+    ELSE (jsonb_build_object(
       'TTL', (3600 + (gs % 5) * 600)::text,
       'CPUCores', (1 + gs % 8)::text,
       'CPULimit', (1.0 + (gs % 8))::text,
@@ -203,7 +249,7 @@ SELECT
       'CollisionSystem', (ARRAY['pp','PbPb','pPb'])[1 + gs % 3],
       'Requirements', 'member(other.GridPartitions,"alice")',
       'MemorySize', (2000 + gs % 4 * 500)::text
-    )::text
+    ) || $EXTRA_JDL_FIELDS)::text
   END
 FROM generate_series(1, 1000) gs;
 
