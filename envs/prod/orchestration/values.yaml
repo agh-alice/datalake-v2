@@ -1,0 +1,155 @@
+# orchestration tier -- Plan 5 Task 1 split of the former umbrella
+# chart/values.yaml (base) and chart/values-cyfronet.yaml (prod overlay,
+# folded in here: envs/prod/orchestration IS the prod deployment now,
+# there is no separate cyfronet overlay file in the split layout). Renders
+# into namespace datalake-orchestration.
+
+# hello CronWorkflow values-gate (Plan-1 final-review N6, Plan 3 Task 5):
+# it exists purely as a workflow-execution canary for kind-verify's manual
+# probe (hack/kind-verify.sh queries `cronworkflow hello` for its pinned
+# busybox image, then submits a throwaway Workflow using that image) --
+# there is no reason for the prod tenant cluster to run a no-op "echo
+# hello" CronWorkflow on a schedule forever. Base default FALSE (prod
+# inherits this, no override needed); this chart's values-kind.yaml
+# overrides to TRUE (Task 4) so the canary exists on kind, where
+# kind-verify's probe needs it.
+helloCron:
+  enabled: false
+
+# echo-receiver: kind-only Slack-webhook stand-in the `slack-datalake`
+# Alertmanager receiver posts to (the platform's Alertmanager, per Plan 5
+# context -- Alertmanager itself is now platform-owned) -- proves the
+# whole route/group/inhibit/receiver pipeline end-to-end without a real
+# Slack workspace. Same values-gate shape as helloCron above: base default
+# FALSE (prod inherits this -- gets a real Slack webhook via ESO instead,
+# Plan 5 Task 3), values-kind.yaml overrides to TRUE (Task 4). See
+# templates/echo-receiver.yaml.
+echoReceiver:
+  enabled: false
+
+# Digest-pinned per no-mutable-tags convention. Verified via:
+#   docker pull busybox:1.36 && docker inspect busybox:1.36 \
+#     --format '{{index .RepoDigests 0}}'
+# (Task 7). Consumed by templates/hello-cronworkflow.yaml.
+#
+# ingest: built from ingest/ (Plan 2 Task 2); ghcr.io/agh-alice/datalake-v2-ingest
+# is public, digest published by .github/workflows/ingest-image.yaml's job
+# summary on every push to main touching ingest/**. Manual pin (not
+# auto-committed) is deliberate -- the chart change is the deploy and stays
+# reviewable in the rendered-branch diff. Pinned from CI run 29221689753
+# (commit 7d5e848, ingest-image workflow, Plan 3 final-review R2: exclude
+# Trino OPTIMIZE replace-snapshots from the freshness gate -- the prior pin
+# [sha256:a1871900...] predates it); verified two ways, both agreeing:
+# `docker buildx imagetools inspect ghcr.io/agh-alice/datalake-v2-ingest:
+# 7d5e848deece1504aa2e0bbfeec2bcbe53178c66` (`Digest:` field) and the GHCR
+# registry API (`GET /v2/agh-alice/datalake-v2-ingest/manifests/<digest>`
+# with an anonymous pull token + an explicit multi-format Accept header,
+# HTTP 200 -- a bare request with no Accept header returned a misleading
+# 404 here) -- same index-manifest structure as the previous pin. Consumed
+# by templates/ingest-cronworkflows.yaml (Task 4 nightly/sitesonar, Task 5
+# maintenance) and hack/run-ingest-once.sh/hack/kind-verify.sh's probes
+# (via `yq -r '.images.ingest' <values file>`).
+images:
+  busybox: "busybox@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662"
+  ingest: "ghcr.io/agh-alice/datalake-v2-ingest@sha256:898ae4ee94a4a255ee8e973dce1a3fe65a226f2d08cb0b25a243862e06948767"
+
+# CronWorkflow scheduling (Plan 2 Task 4). Consumed by
+# templates/ingest-cronworkflows.yaml's `.Values.ingest.schedules.*`.
+# retentionDays documents the retention window operators must keep in sync
+# with the ingest-env Secret's RETENTION_DAYS key (harness-created --
+# hack/kind-up.sh on kind, ExternalSecret on the prod tenant cluster --
+# same no-secrets-in-rendered-branches convention as lakekeeperDb's
+# encryption key, envs/prod/storage/values.yaml); it is NOT consumed by
+# any chart template directly, since the CronWorkflow's run-retention step
+# gets RETENTION_DAYS via envFrom the Secret, not from values -- this
+# field exists so the intended value is visible in Git even though the
+# actual runtime value is set out-of-band.
+ingest:
+  schedules:
+    nightly: "0 2 * * *"
+    sitesonar: "0 3 * * *"
+    # Plan 2 Task 5: weekly Iceberg snapshot expiry (ingest/src/alice_ingest/
+    # maintenance.py). Sunday 04:00 -- outside nightly's 02:00 and
+    # sitesonar's 03:00 windows so it never contends with either for the
+    # landing-DB/Lakekeeper connection, and weekly (not nightly) because
+    # snapshot accumulation across one day of nightly + sitesonar merges is
+    # not large enough to need daily expiry (design D12).
+    maintenance: "0 4 * * 0"
+  # Final-review N5: every CronWorkflow's workflowSpec gets an
+  # `activeDeadlineSeconds` ceiling -- a stuck pod (network partition on a
+  # PG/Lakekeeper/S3 call, a hung site-sonar HTTP fetch, etc.) previously
+  # had no upper bound at all and would run (and hold `concurrencyPolicy:
+  # Forbid`'s slot) indefinitely, silently blocking every subsequent
+  # scheduled tick. Defaults sized to each job's normal shape: nightly and
+  # sitesonar at 6h (21600s -- generous headroom over the ~1-2 min kind
+  # runs in task-*-report.md's acceptance timings, but bounded against a
+  # genuine hang; sitesonar's real cyfronet backlog is the larger of the
+  # two, per sitesonar.py's module docstring), maintenance at 1h (3600s --
+  # a single expire_snapshots() pass per table, no external HTTP fetch).
+  # Values-driven (not hardcoded in the template) so an environment can
+  # override per its own SLA without a chart change.
+  activeDeadlineSeconds:
+    nightly: 21600
+    sitesonar: 21600
+    maintenance: 3600
+  retentionDays: "14"
+
+# ---------------------------------------------------------------------
+# Folded in from the old umbrella chart's chart/values-cyfronet.yaml
+# (Plan 5 Task 1: envs/prod/orchestration IS the prod overlay now, so
+# there is no separate cyfronet values file to keep). Its only real value
+# key (ingest.retentionDays: "14") duplicated the base default above and
+# is not repeated as a second layer; the illustrative documentation is
+# preserved below, DNS/namespace names updated for the three-tier split.
+# No new ExternalSecret resource is created by this task (Plan 5 Task 3's
+# job) -- this remains documentation only, same as it was before the split.
+#
+# ingest (Plan 2 Task 6): no Helm-templated Secret or ExternalSecret exists
+# for `datalake-orchestration/ingest-env` in this chart -- same
+# "no-secrets-in-rendered-branches" convention as lakekeeper-pg-encryption
+# (envs/prod/storage/values.yaml's comment). On kind, hack/kind-up.sh
+# creates `ingest-env` directly from harness-generated/in-cluster values.
+# On the prod tenant cluster it must be sourced via an ExternalSecret
+# instead, against the platform's ClusterSecretStore (Plan 5 Task 3;
+# same pattern docs/runbooks/bootstrap-cyfronet.md §5 already used for
+# lakekeeper-pg-encryption) -- applied once, out-of-band, NOT by this
+# chart:
+#
+#   apiVersion: external-secrets.io/v1
+#   kind: ExternalSecret
+#   metadata: {name: ingest-env, namespace: datalake-orchestration}
+#   spec:
+#     refreshInterval: 1h
+#     secretStoreRef: {name: <platform ClusterSecretStore name, TO VERIFY>, kind: ClusterSecretStore}
+#     target: {name: ingest-env}
+#     data:
+#       - {secretKey: PG_URL, remoteRef: {key: ingest-pg-url}}
+#       - {secretKey: S3_ENDPOINT, remoteRef: {key: ingest-s3-endpoint}}
+#       - {secretKey: S3_ACCESS_KEY, remoteRef: {key: ingest-s3-access-key}}
+#       - {secretKey: S3_SECRET_KEY, remoteRef: {key: ingest-s3-secret-key}}
+#       - {secretKey: S3_BUCKET, remoteRef: {key: ingest-s3-bucket}}
+#       - {secretKey: S3_REGION, remoteRef: {key: ingest-s3-region}}
+#       - {secretKey: LAKEKEEPER_URI, remoteRef: {key: ingest-lakekeeper-uri}}
+#       - {secretKey: LAKEKEEPER_WAREHOUSE, remoteRef: {key: ingest-lakekeeper-warehouse}}
+#       - {secretKey: RETENTION_DAYS, remoteRef: {key: ingest-retention-days}}
+#       - {secretKey: TRINO_URI, remoteRef: {key: ingest-trino-uri}}
+#
+# Illustrative env-var contract (docs/runbooks/ingestion-pipeline.md owns
+# the authoritative table) with in-cluster DNS names updated for the
+# three-tier split -- S3/object-storage values are still TO VERIFY against
+# real cyfronet/platform credentials (Plan 5 Task 3):
+#   PG_URL                postgresql://mon_user:<REDACTED>@mon-data-rw.datalake-storage:5432/mon_data
+#   S3_ENDPOINT            <platform/cyfronet S3 endpoint>              # TO VERIFY
+#   S3_ACCESS_KEY          <platform/cyfronet S3 access key id>         # TO VERIFY
+#   S3_SECRET_KEY           <platform/cyfronet S3 secret access key>     # TO VERIFY
+#   S3_BUCKET              <bucket>/<key-prefix>                       # TO VERIFY --
+#                          bucket AND key-prefix both required, see
+#                          hack/kind-up.sh's "CRITICAL FINDING" comment
+#   S3_REGION              <region, or any non-empty string>            # TO VERIFY
+#   LAKEKEEPER_URI         http://lakekeeper.datalake-storage.svc:8181   # namespace updated, Plan 5 Task 1
+#   LAKEKEEPER_WAREHOUSE   default
+#   RETENTION_DAYS         "14"                                        # keep in sync with ingest.retentionDays above
+#   TRINO_URI              http://trino.datalake-compute.svc:8080       # namespace updated, Plan 5 Task 1;
+#                          non-secret (final review R1) -- required per-command by
+#                          check-freshness/run-trino-maintenance/apply-views, see
+#                          docs/runbooks/ingestion-pipeline.md section 2

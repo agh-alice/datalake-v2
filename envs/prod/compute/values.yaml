@@ -1,0 +1,5 @@
+# compute tier -- Plan 5 Task 1: no values yet. This chart has no authored
+# templates of its own (see templates/_helpers.tpl); Trino arrives as a
+# chart dependency in Plan 5 Task 2, which is where this file gains real
+# content (Trino's own values block, x86-64-v3 nodeSelector, the Iceberg
+# REST catalog pointed at Lakekeeper's in-cluster service).

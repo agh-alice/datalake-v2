@@ -1,14 +1,18 @@
 # Landing DB replacing the RAID0 VM (design D7). max_connections deliberately
 # low: the historical multi-client scaling attempts DDoSed Postgres (E6).
+#
+# Plan 5 Task 1: retargeted from the old umbrella chart's dedicated
+# `landing-db` namespace to `datalake-storage` (platform-owned, one of the
+# three tenant namespaces -- Plan 5's storage tier).
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   name: mon-data
-  namespace: landing-db
+  namespace: datalake-storage
 spec:
   instances: {{ .Values.landingDb.instances }}
   # Digest-pinned per no-mutable-tags convention (Plan-1 final-review N2) --
-  # see chart/templates/lakekeeper-db.yaml's comment for the verification
+  # see templates/lakekeeper-db.yaml's comment for the verification
   # method (same digest, same upstream image, both Clusters pin together).
   imageName: ghcr.io/cloudnative-pg/postgresql:16.6@sha256:53be6d727c7b3cf0df2b147f7ce7cdd31d37fd285314294871a4ccc3837b6872
   storage:

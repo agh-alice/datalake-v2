@@ -1,0 +1,144 @@
+# Design D11 — failure-derived alert set (E4/E5/E2).
+#
+# Plan 5 Task 1: this PrometheusRule is the storage-tier half of the old
+# umbrella chart's chart/templates/datalake-alerts.yaml, split per the
+# plan's Step 1 instruction ("pipeline/workflow rules -> orchestration,
+# database rules -> storage"). This file keeps the original `datalake`
+# group (database/CNPG/disk/ArgoCD-sync reliability rules); the pipeline-
+# specific `datalake-pipeline` group moved to
+# envs/prod/orchestration/templates/datalake-alerts.yaml. NodeDiskPressure
+# and ArgoAppOutOfSync don't watch a database metric specifically, but
+# they were never workflow/pipeline rules either -- placed here by
+# elimination, same group as before the split.
+#
+# NOT done here (Plan 5 Task 3's job, not Task 1's -- "structural split
+# only"): adding `release: monitoring` (Global Constraint, Task 3 Step 5
+# explicitly owns it).
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: datalake-alerts
+  namespace: datalake-storage
+spec:
+  groups:
+    - name: datalake
+      rules:
+        - alert: LandingDBXidAgeHigh
+          expr: max(cnpg_pg_database_xid_age) > 1000000000
+          for: 30m
+          labels:
+            severity: critical
+          annotations:
+            summary: Landing DB transaction-ID age approaching wraparound
+            description: >-
+              cnpg_pg_database_xid_age has exceeded 1e9 for 30m. Unmitigated,
+              this repeats E4 -- the landing DB hit transaction-ID
+              wraparound protection and refused all writes for two months,
+              unnoticed, because orphaned temp tables pinned the frozen-XID
+              horizon.
+            incident: E4
+            runbook_url: docs/runbooks/xid-wraparound.md
+
+        # Task 6 review finding: cnpg_pg_replication_streaming_replicas is reported
+        # per-pod (each pod's own count of replicas streaming *from* it), not
+        # per-cluster. A cascading-free CNPG cluster's replica pods always report 0
+        # (nothing streams downstream of a replica) and a single-instance cluster has
+        # no replicas by design -- the original `< 1` expr fired on every healthy
+        # replica pod and on kind's deliberately single-instance mon-data. Fixed by
+        # taking the max across each cluster's pods (the primary's count is the
+        # cluster's true streaming-replica count) and comparing against a
+        # values-driven threshold (instances - 1), rendered only when the cluster is
+        # actually configured for HA (instances > 1) -- on kind, landingDb.instances
+        # is 1 (values-kind.yaml), so this block is intentionally absent for mon-data.
+        #
+        # Deviation from plan: cnpg_pg_replication_streaming_replicas carries no
+        # `cluster` label (verified live via Prometheus /api/v1/series -- only
+        # container/endpoint/instance/job/namespace/pod are present; `job` is
+        # "<namespace>/<cluster>" and only cnpg_collector_up, a different metric,
+        # carries a `cluster` label). Each CNPG Cluster in the OLD umbrella chart
+        # lived in its own dedicated namespace (lakekeeper-db.yaml -> ns lakekeeper,
+        # landing-db.yaml -> ns landing-db), so `namespace` alone uniquely
+        # identified the cluster and was used as the grouping/matching label.
+        #
+        # Plan 5 Task 1 fix (forced by the namespace retarget, not new alert
+        # logic): both CNPG clusters now live in the SAME namespace
+        # (datalake-storage, templates/{landing-db,lakekeeper-db}.yaml) --
+        # `namespace=` alone can no longer tell mon-data's pods from
+        # lakekeeper-db's. Switched to the `job` label instead, using the
+        # exact "<namespace>/<cluster>" shape this same comment already
+        # documented as verified live -- `job="datalake-storage/mon-data"`
+        # and `job="datalake-storage/lakekeeper-db"` respectively. Not
+        # re-verified live against the prod tenant cluster (no cluster
+        # access from this task); flagging that as a Task 3 (monitoring
+        # integration) follow-up check once PrometheusRules actually sync.
+        {{- if gt (int .Values.landingDb.instances) 1 }}
+        - alert: CNPGClusterUnhealthy
+          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/mon-data"}) < {{ sub (int .Values.landingDb.instances) 1 }}
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: CNPG cluster mon-data has fewer streaming replicas than expected
+            description: >-
+              cnpg_pg_replication_streaming_replicas (max across mon-data's pods,
+              i.e. the primary's view) has been below
+              {{ sub (int .Values.landingDb.instances) 1 }} for 15m -- HA is
+              degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy
+              that CNPG replaces.
+            incident: E5
+        {{- end }}
+        {{- if gt (int .Values.lakekeeperDb.instances) 1 }}
+        - alert: CNPGClusterUnhealthy
+          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/lakekeeper-db"}) < {{ sub (int .Values.lakekeeperDb.instances) 1 }}
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: CNPG cluster lakekeeper-db has fewer streaming replicas than expected
+            description: >-
+              cnpg_pg_replication_streaming_replicas (max across lakekeeper-db's
+              pods, i.e. the primary's view) has been below
+              {{ sub (int .Values.lakekeeperDb.instances) 1 }} for 15m -- HA is
+              degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy
+              that CNPG replaces.
+            incident: E5
+        {{- end }}
+
+        - alert: NodeDiskPressure
+          expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.2
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: Node filesystem below 20% free
+            description: >-
+              A node filesystem has had less than 20% free space for 30m.
+              E5 included a root disk left 100% full by one unrotated
+              27GB Docker log, unnoticed until someone asked where the
+              data was.
+            incident: E5
+
+        # Plan 5 Task 1 finding, not silently dropped: this alert's data
+        # source is the ServiceMonitor deleted in this same task
+        # (chart/templates/argocd-servicemonitor.yaml -- ArgoCD is
+        # hub-side now, "platform owns namespaces; ArgoCD is hub-side" per
+        # the Task 1 brief). Nothing in this repo scrapes argocd_app_info
+        # any more, so this rule has no series to evaluate against once it
+        # syncs to the prod tenant cluster -- it will not fire, silently,
+        # rather than error. Left in place (moving templates, not pruning
+        # alert content, is this task's scope) since Task 3 Step 5
+        # ("delete anything that assumed we own Prometheus") is explicitly
+        # where this belongs; flagging here so it isn't lost.
+        - alert: ArgoAppOutOfSync
+          expr: argocd_app_info{sync_status!="Synced"} == 1
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: ArgoCD Application out of sync for over an hour
+            description: >-
+              argocd_app_info reports sync_status != Synced for 1h -- the
+              live cluster no longer matches the tracked Git source. E2 was
+              exactly this class of silent drift: a Dec-2023 image running
+              in production instead of the repo's code.
+            incident: E2

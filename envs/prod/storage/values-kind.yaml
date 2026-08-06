@@ -1,0 +1,8 @@
+# environment: kind -- placeholder only.
+#
+# Plan 5 Task 1 (this split) deliberately does not port the old
+# chart/values-kind.yaml's landingDb overrides (instances: 1, storageSize:
+# 2Gi) here: Task 4 reworks the kind harness to mirror the tenant topology
+# (three Applications, one per tier, against envs/prod/<tier> +
+# values-kind.yaml) and is where this file gets populated for real. Until
+# then this file intentionally renders no overrides.

@@ -1,9 +1,11 @@
+# Plan 5 Task 1: retargeted from the old umbrella chart's `argo-workflows`
+# namespace to `datalake-orchestration` (Plan 5's orchestration tier).
 {{- if .Values.helloCron.enabled }}
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
   name: hello
-  namespace: argo-workflows
+  namespace: datalake-orchestration
 spec:
   # CRDs shipped with argo-workflows chart 1.0.19 (app v4.0.7) drop the
   # legacy singular `schedule` -- `schedules` (string list, v3.6+) is the

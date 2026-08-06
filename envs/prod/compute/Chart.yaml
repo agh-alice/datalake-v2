@@ -1,0 +1,5 @@
+apiVersion: v2
+name: datalake-compute
+description: "ALICE datalake v2 -- compute tier (Trino query engine, arrives as a chart dependency in Plan 5 Task 2). Renders into namespace datalake-compute on the platform-managed alice-k8s-datalake cluster (Plan 5 tenant port)."
+type: application
+version: 0.1.0

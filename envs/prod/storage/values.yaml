@@ -1,0 +1,34 @@
+# storage tier -- Plan 5 Task 1 split of the former umbrella chart/values.yaml.
+# Everything here renders into namespace datalake-storage (platform-owned,
+# not templated by this chart -- see templates/*.yaml).
+
+# enablePodMonitor drives Cluster.spec.monitoring.enablePodMonitor (see
+# templates/{lakekeeper-db,landing-db}.yaml). CNPG 0.28.0 marks that
+# field deprecated ("will be removed in an upcoming release") but it is
+# still present and functional in the CRD schema (verified via `kubectl
+# explain cluster.spec.monitoring.enablePodMonitor`, Task 6) -- used as-is;
+# switch to hand-authored PodMonitor resources if a future CNPG bump drops it.
+lakekeeperDb:
+  instances: 2
+  storageSize: 5Gi
+  enablePodMonitor: true
+
+landingDb:
+  instances: 3
+  storageSize: 50Gi
+  maxConnections: "60"
+  enablePodMonitor: true
+
+# Lakekeeper's Postgres secret-store encryption key lives in Secret
+# datalake-storage/lakekeeper-pg-encryption -- created by hack/kind-up.sh on
+# kind (random per cluster) and, on the prod tenant cluster, by an
+# ExternalSecret against the platform's ClusterSecretStore (Plan 5 Task 3).
+# Never templated in this chart (no-secrets-in-rendered-branches
+# constraint; upstream auto-generation relies on helm lookup which ArgoCD
+# render does not support, argoproj/argo-cd#5202).
+#
+# Plan 5 Task 1 note: this Secret's namespace changes from the old
+# umbrella chart's dedicated `lakekeeper` namespace to `datalake-storage`
+# (lakekeeper-db.yaml is retargeted there, same as landing-db.yaml) --
+# whatever provisions it (hack/kind-up.sh, or the Task 3 ExternalSecret)
+# must follow.

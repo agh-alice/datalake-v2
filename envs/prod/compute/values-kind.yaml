@@ -1,0 +1,6 @@
+# environment: kind -- placeholder only.
+#
+# Plan 5 Task 1 does not populate kind-specific values: this chart has no
+# templates yet (Trino arrives in Task 2), and the kind harness itself is
+# reworked to mirror the tenant topology in Task 4. Until then this file
+# intentionally renders no overrides.

@@ -1,18 +1,21 @@
 # Plan 2 Task 4: nightly ingestion+retention and site-sonar CronWorkflows.
-# Same v4 `schedules:` list schema as chart/templates/hello-cronworkflow.yaml
+# Same v4 `schedules:` list schema as templates/hello-cronworkflow.yaml
 # (Task 7 finding: legacy singular `schedule` is rejected by the CRDs
 # shipped with argo-workflows chart 1.0.19 / app v4.0.7 -- verified via
 # `kubectl explain cronworkflow.spec.schedules`), same pipeline-runner
-# ServiceAccount + RBAC (chart/templates/workflows-rbac.yaml), same
+# ServiceAccount + RBAC (templates/workflows-rbac.yaml), same
 # ttlStrategy cleanup pattern -- 86400s (24h) here rather than hello's 3600s
 # so a failed nightly run's pod/logs survive long enough for a human to
 # triage the next morning.
+#
+# Plan 5 Task 1: retargeted from the old umbrella chart's `argo-workflows`
+# namespace to `datalake-orchestration` (Plan 5's orchestration tier).
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
   name: ingest-nightly
-  namespace: argo-workflows
+  namespace: datalake-orchestration
 spec:
   schedules: [{{ .Values.ingest.schedules.nightly | quote }}]
   concurrencyPolicy: Forbid
@@ -23,7 +26,7 @@ spec:
     # Final-review N5: a stuck run-nightly/run-retention pod previously had
     # no upper bound and would hold concurrencyPolicy: Forbid's slot
     # indefinitely, blocking every later scheduled tick -- see
-    # chart/values.yaml's ingest.activeDeadlineSeconds comment.
+    # values.yaml's ingest.activeDeadlineSeconds comment.
     activeDeadlineSeconds: {{ .Values.ingest.activeDeadlineSeconds.nightly }}
     templates:
       # 3-step DAG (Plan 3 Task 3 adds check-freshness): run-retention only
@@ -75,7 +78,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
   name: ingest-sitesonar
-  namespace: argo-workflows
+  namespace: datalake-orchestration
 spec:
   schedules: [{{ .Values.ingest.schedules.sitesonar | quote }}]
   concurrencyPolicy: Forbid
@@ -113,7 +116,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow
 metadata:
   name: ingest-maintenance
-  namespace: argo-workflows
+  namespace: datalake-orchestration
 spec:
   schedules: [{{ .Values.ingest.schedules.maintenance | quote }}]
   concurrencyPolicy: Forbid

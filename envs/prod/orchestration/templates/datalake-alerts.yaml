@@ -1,111 +1,39 @@
-# Design D11 — failure-derived alert set (E4/E5/E2). Plan 2 appends
-# workflow/staleness alerts to this same PrometheusRule group.
+# Plan 5 Task 1: this PrometheusRule is the orchestration-tier half of the
+# old umbrella chart's chart/templates/datalake-alerts.yaml, split per the
+# plan's Step 1 instruction ("pipeline/workflow rules -> orchestration,
+# database rules -> storage"). This file keeps the original
+# `datalake-pipeline` group verbatim (all workflow/CronWorkflow rules); the
+# database/CNPG/disk/ArgoCD-sync rules (group `datalake`) moved to
+# envs/prod/storage/templates/datalake-alerts.yaml. Object renamed
+# `datalake-pipeline-alerts` (was `datalake-alerts`) so the two tiers'
+# PrometheusRule objects are distinguishable by name, not just namespace.
+#
+# Namespace retargeting (Step 3): every `exported_namespace="argo-workflows"`
+# literal below is updated to `exported_namespace="datalake-orchestration"`
+# -- the CronWorkflow/Workflow objects these alerts watch now live there
+# (templates/{ingest-cronworkflows,hello-cronworkflow}.yaml), and per Plan
+# 5's context the platform's Argo Workflows controller is scoped to
+# datalake-orchestration via controller.workflowNamespaces (verified
+# 2026-08-06, deliverables/plans/2026-08-06-datalake-v2-tenant-port-plan.md).
+# The extensive investigative comments below describing what was verified
+# LIVE against the OLD kind cluster's `argo-workflows` namespace are left
+# as historical record -- they document how the metric/label shape was
+# established, not the current deployment target, and remain accurate as
+# that record. NOT re-verified live against the prod tenant cluster from
+# this task (no cluster access here) -- flagging as a Task 3/5 follow-up
+# once these rules actually sync.
+#
+# NOT done here (Plan 5 Task 3's job, not Task 1's -- "structural split
+# only"): adding `release: monitoring` (Global Constraint, Task 3 Step 5
+# explicitly owns it) and resource requests on the CronWorkflow containers
+# these alerts watch (Task 3 Step 3).
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: datalake-alerts
-  namespace: monitoring
+  name: datalake-pipeline-alerts
+  namespace: datalake-orchestration
 spec:
   groups:
-    - name: datalake
-      rules:
-        - alert: LandingDBXidAgeHigh
-          expr: max(cnpg_pg_database_xid_age) > 1000000000
-          for: 30m
-          labels:
-            severity: critical
-          annotations:
-            summary: Landing DB transaction-ID age approaching wraparound
-            description: >-
-              cnpg_pg_database_xid_age has exceeded 1e9 for 30m. Unmitigated,
-              this repeats E4 -- the landing DB hit transaction-ID
-              wraparound protection and refused all writes for two months,
-              unnoticed, because orphaned temp tables pinned the frozen-XID
-              horizon.
-            incident: E4
-            runbook_url: docs/runbooks/xid-wraparound.md
-
-        # Task 6 review finding: cnpg_pg_replication_streaming_replicas is reported
-        # per-pod (each pod's own count of replicas streaming *from* it), not
-        # per-cluster. A cascading-free CNPG cluster's replica pods always report 0
-        # (nothing streams downstream of a replica) and a single-instance cluster has
-        # no replicas by design -- the original `< 1` expr fired on every healthy
-        # replica pod and on kind's deliberately single-instance mon-data. Fixed by
-        # taking the max across each cluster's pods (the primary's count is the
-        # cluster's true streaming-replica count) and comparing against a
-        # values-driven threshold (instances - 1), rendered only when the cluster is
-        # actually configured for HA (instances > 1) -- on kind, landingDb.instances
-        # is 1 (values-kind.yaml), so this block is intentionally absent for mon-data.
-        #
-        # Deviation from plan: cnpg_pg_replication_streaming_replicas carries no
-        # `cluster` label (verified live via Prometheus /api/v1/series -- only
-        # container/endpoint/instance/job/namespace/pod are present; `job` is
-        # "<namespace>/<cluster>" and only cnpg_collector_up, a different metric,
-        # carries a `cluster` label). Each CNPG Cluster in this chart lives in its
-        # own dedicated namespace (lakekeeper-db.yaml -> ns lakekeeper, landing-db.yaml
-        # -> ns landing-db; chart/templates/namespaces.yaml), so `namespace` uniquely
-        # identifies the cluster and is used as the grouping/matching label instead.
-        {{- if gt (int .Values.landingDb.instances) 1 }}
-        - alert: CNPGClusterUnhealthy
-          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="landing-db"}) < {{ sub (int .Values.landingDb.instances) 1 }}
-          for: 15m
-          labels:
-            severity: critical
-          annotations:
-            summary: CNPG cluster mon-data has fewer streaming replicas than expected
-            description: >-
-              cnpg_pg_replication_streaming_replicas (max across mon-data's pods,
-              i.e. the primary's view) has been below
-              {{ sub (int .Values.landingDb.instances) 1 }} for 15m -- HA is
-              degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy
-              that CNPG replaces.
-            incident: E5
-        {{- end }}
-        {{- if gt (int .Values.lakekeeperDb.instances) 1 }}
-        - alert: CNPGClusterUnhealthy
-          expr: max by (namespace) (cnpg_pg_replication_streaming_replicas{namespace="lakekeeper"}) < {{ sub (int .Values.lakekeeperDb.instances) 1 }}
-          for: 15m
-          labels:
-            severity: critical
-          annotations:
-            summary: CNPG cluster lakekeeper-db has fewer streaming replicas than expected
-            description: >-
-              cnpg_pg_replication_streaming_replicas (max across lakekeeper-db's
-              pods, i.e. the primary's view) has been below
-              {{ sub (int .Values.lakekeeperDb.instances) 1 }} for 15m -- HA is
-              degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy
-              that CNPG replaces.
-            incident: E5
-        {{- end }}
-
-        - alert: NodeDiskPressure
-          expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) < 0.2
-          for: 30m
-          labels:
-            severity: warning
-          annotations:
-            summary: Node filesystem below 20% free
-            description: >-
-              A node filesystem has had less than 20% free space for 30m.
-              E5 included a root disk left 100% full by one unrotated
-              27GB Docker log, unnoticed until someone asked where the
-              data was.
-            incident: E5
-
-        - alert: ArgoAppOutOfSync
-          expr: argocd_app_info{sync_status!="Synced"} == 1
-          for: 1h
-          labels:
-            severity: warning
-          annotations:
-            summary: ArgoCD Application out of sync for over an hour
-            description: >-
-              argocd_app_info reports sync_status != Synced for 1h -- the
-              live cluster no longer matches the tracked Git source. E2 was
-              exactly this class of silent drift: a Dec-2023 image running
-              in production instead of the repo's code.
-            incident: E2
-
     # Plan 2 Task 5 -- design D11's "minimum alert set" extended to the
     # ingestion pipeline itself (deliverables/2026-07-12-datalake-v2-design.md,
     # section 5: "workflow/CronWorkflow failure (E1); ... ingestion watermark
@@ -133,29 +61,32 @@ spec:
     # scrape-target namespace win the plain `namespace` label, renaming the
     # SCRAPED METRIC's own `namespace="argo-workflows"` value (the
     # workflow's namespace -- what these alerts actually need) to
-    # `exported_namespace`. On this cluster the controller pod happens to
-    # run in the same namespace as the workflows it manages, so both labels
-    # currently read "argo-workflows" and a plain `namespace=` filter would
-    # have silently worked BY COINCIDENCE; every expr below uses
-    # `exported_namespace` deliberately so it stays correct if that ever
-    # changes (e.g. a cluster-scoped controller install, or workflows
-    # spread across namespaces).
+    # `exported_namespace`. On the OLD kind cluster the controller pod
+    # happened to run in the same namespace as the workflows it manages, so
+    # both labels read "argo-workflows" and a plain `namespace=` filter
+    # would have silently worked BY COINCIDENCE; every expr below uses
+    # `exported_namespace` deliberately so it stays correct across that
+    # kind of change -- which is exactly what the Plan 5 namespace
+    # retarget (argo-workflows -> datalake-orchestration) now exercises.
     - name: datalake-pipeline
       rules:
         - alert: WorkflowFailed
-          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          expr: increase(argo_workflows_total_count{exported_namespace="datalake-orchestration", phase=~"Failed|Error"}[1h]) > 0
           for: 5m
           labels:
             severity: warning
           annotations:
-            summary: An Argo Workflow in argo-workflows entered Failed/Error in the last hour
+            summary: An Argo Workflow in datalake-orchestration entered Failed/Error in the last hour
             description: >-
               argo_workflows_total_count{exported_namespace,phase} is a
               per-namespace, per-phase COUNTER (verified live against the
               controller's own /metrics AND against Prometheus's own stored
-              series, 2026-07-12 -- see this group's header comment on why
+              series, 2026-07-12, on the old kind cluster's `argo-workflows`
+              namespace -- see this group's header comment on why
               `exported_namespace`, not the scraped `namespace` label,
-              carries the workflow's actual namespace) -- increase() over 1h
+              carries the workflow's actual namespace; Plan 5 retargets the
+              literal to `datalake-orchestration`, the prod tenant
+              namespace these Workflows now run in) -- increase() over 1h
               counts workflows
               that TRANSITIONED into Failed or Error during that window,
               which is what "entering Failed/Error in the last hour" means;
@@ -163,7 +94,7 @@ spec:
               namespace label at all on this controller) would miss a
               transition already reaped by ttlStrategy before the next
               scrape, or hide which namespace it belonged to. Covers every
-              Workflow in ns argo-workflows: ingest-nightly (both its
+              Workflow in ns datalake-orchestration: ingest-nightly (both its
               run-nightly and run-retention steps -- see RetentionUnverifiedRows
               below for one specific run-retention failure cause),
               ingest-sitesonar, ingest-maintenance, and hello. E1 was
@@ -181,7 +112,7 @@ spec:
             incident: E1
 
         - alert: IcebergIngestStale
-          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-nightly", exported_namespace="argo-workflows"}[26h]) == 0
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-nightly", exported_namespace="datalake-orchestration"}[26h]) == 0
           for: 5m
           labels:
             severity: critical
@@ -213,7 +144,7 @@ spec:
             incident: E4
 
         - alert: RetentionUnverifiedRows
-          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          expr: increase(argo_workflows_total_count{exported_namespace="datalake-orchestration", phase=~"Failed|Error"}[1h]) > 0
           for: 5m
           labels:
             severity: warning
@@ -261,7 +192,7 @@ spec:
         # snapshot" -- a gap that class of failure would leave completely
         # unalerted (Plan 2 Task 5's report: "D11 snapshot-staleness:
         # documented as composite; data-layer check -> Plan 3"). ingest-
-        # nightly's third DAG step, check-freshness (chart/templates/ingest-
+        # nightly's third DAG step, check-freshness (templates/ingest-
         # cronworkflows.yaml), closes that gap: `alice_ingest.maintenance.
         # run_freshness_check()` queries `max(committed_at)` from each core
         # table's `"<table>$snapshots"` Trino metadata table and exits
@@ -286,7 +217,7 @@ spec:
         # the terminal `FRESHNESS CHECK FAILED: ...` summary (maintenance.py's
         # format_freshness_summary()/run_freshness_check()).
         - alert: IcebergSnapshotStale
-          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[1h]) > 0
+          expr: increase(argo_workflows_total_count{exported_namespace="datalake-orchestration", phase=~"Failed|Error"}[1h]) > 0
           for: 5m
           labels:
             severity: warning
@@ -296,7 +227,7 @@ spec:
               Deliberate no-new-components decision (Plan 3 Task 3): the
               data-layer freshness gate (alice_ingest.maintenance.
               run_freshness_check(), wired as ingest-nightly's third DAG step
-              `check-freshness`, chart/templates/ingest-cronworkflows.yaml)
+              `check-freshness`, templates/ingest-cronworkflows.yaml)
               exposes NO metric of its own -- it fails its own container on
               staleness, which fails the owning Workflow, which this
               PrometheusRule group already detects via WorkflowFailed. This
@@ -321,19 +252,20 @@ spec:
         # exported_namespace label as WorkflowFailed (this group's header
         # comment: argo_workflows_total_count{exported_namespace,phase} is
         # the only per-namespace per-phase Failed/Error signal this
-        # controller version exposes -- re-verified live against this
-        # cluster's own Prometheus, 2026-07-13: `exported_namespace` values
-        # are exactly `argo-workflows`/`argocd`, matching the header
-        # comment's claim, not assumed from memory).
+        # controller version exposes -- re-verified live against the old
+        # kind cluster's own Prometheus, 2026-07-13: `exported_namespace`
+        # values were exactly `argo-workflows`/`argocd`, matching the
+        # header comment's claim, not assumed from memory; the literal is
+        # retargeted to `datalake-orchestration` here per Plan 5 Task 1).
         - alert: WorkflowChronicFailure
-          expr: increase(argo_workflows_total_count{exported_namespace="argo-workflows", phase=~"Failed|Error"}[7d]) >= 3
+          expr: increase(argo_workflows_total_count{exported_namespace="datalake-orchestration", phase=~"Failed|Error"}[7d]) >= 3
           for: 5m
           labels:
             severity: critical
           annotations:
-            summary: 3+ Argo Workflow failures in argo-workflows within 7 days -- chronic, not a one-off
+            summary: 3+ Argo Workflow failures in datalake-orchestration within 7 days -- chronic, not a one-off
             description: >-
-              argo_workflows_total_count{exported_namespace="argo-workflows",
+              argo_workflows_total_count{exported_namespace="datalake-orchestration",
               phase=~"Failed|Error"} has accumulated 3 or more Failed/Error
               transitions in a rolling 7-day window. WorkflowFailed (above)
               already pages on every individual failure at `warning`; this
@@ -353,7 +285,7 @@ spec:
         # -- this group's header comment), windowed to each schedule's own
         # cadence + a buffer.
         - alert: SiteSonarStale
-          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-sitesonar", exported_namespace="argo-workflows"}[26h]) == 0
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-sitesonar", exported_namespace="datalake-orchestration"}[26h]) == 0
           for: 5m
           labels:
             severity: warning
@@ -362,7 +294,7 @@ spec:
             description: >-
               Same trigger-staleness shape as IcebergIngestStale (this
               group, above) but for the `ingest-sitesonar` CronWorkflow
-              (chart/values.yaml's `ingest.schedules.sitesonar`, daily
+              (values.yaml's `ingest.schedules.sitesonar`, daily
               03:00 default): 24h cadence + 2h buffer. Detects "the
               schedule stopped firing at all" (controller down, CronWorkflow
               suspended/deleted/renamed); does NOT detect "triggered but
@@ -375,7 +307,7 @@ spec:
 
         # Plan 4 Task T2S1 (P2-final follow-up) + the P3-final ride-along
         # (deferral-aware constraint): trigger-staleness for
-        # `ingest-maintenance` (weekly, chart/values.yaml's
+        # `ingest-maintenance` (weekly, values.yaml's
         # `ingest.schedules.maintenance`, Sunday 04:00 default) -- 7d
         # cadence + a day of buffer.
         #
@@ -410,7 +342,7 @@ spec:
         # future fix would need a new component (e.g. a Pushgateway metric
         # from maintenance.py itself), deliberately not added here.
         - alert: IcebergMaintenanceStale
-          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-maintenance", exported_namespace="argo-workflows"}[8d]) == 0
+          expr: increase(argo_workflows_cronworkflows_triggered_total{name="ingest-maintenance", exported_namespace="datalake-orchestration"}[8d]) == 0
           for: 5m
           labels:
             severity: warning

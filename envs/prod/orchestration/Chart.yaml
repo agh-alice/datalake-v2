@@ -1,0 +1,5 @@
+apiVersion: v2
+name: datalake-orchestration
+description: "ALICE datalake v2 -- orchestration tier (Argo Workflows CronWorkflows, pipeline RBAC, pipeline alert rules, kind-only echo receiver). Renders into namespace datalake-orchestration on the platform-managed alice-k8s-datalake cluster (Plan 5 tenant port)."
+type: application
+version: 0.1.0
