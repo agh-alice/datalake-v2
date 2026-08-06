@@ -3,14 +3,37 @@ on:
   push:
     branches: [main]
   pull_request:
+# Plan 5 Task 5: this is the seam gate the hydrator relies on -- the
+# platform's ApplicationSet hydrates whatever lands on `main` with no CI of
+# its own on their side, so this workflow (helm dependency build + helm
+# lint + helm template + kubeconform + hack/check-seam.sh, all three tier
+# charts, prod AND kind values, via `make lint` -- the exact same
+# hack/lint.sh a contributor runs locally, no drift between local and CI)
+# is what actually stops a cluster-scoped resource or a broken chart from
+# ever reaching `environments/prod`. Cancel superseded runs on the same PR
+# so a fast-follow push doesn't queue behind a run whose result no longer
+# matters.
+concurrency:
+  group: lint-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
+        with:
+          # Pinned, not "latest" -- matches the helm this gate was verified
+          # against locally (`helm version --short` -> v4.2.3+g43e8b7f).
+          # Verified-on-date: 2026-08-06.
+          version: v4.2.3
       - run: |
-          curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz && sudo mv kubeconform /usr/local/bin/
+          # Pinned release tag, not the floating /latest/ redirect --
+          # "latest" silently changes what CI validates against on its own
+          # schedule, independent of any commit to this repo. v0.8.0
+          # verified as the current kubeconform release, 2026-08-06 (same
+          # version installed locally for `hack/lint.sh` development).
+          curl -sL https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz | tar xz && sudo mv kubeconform /usr/local/bin/
       - run: make lint
   shellcheck:
     runs-on: ubuntu-latest

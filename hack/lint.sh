@@ -22,7 +22,13 @@ for tier in "${TIERS[@]}"; do
 done
 
 echo "== seam gate: no cluster-scoped kinds (Global Constraints) =="
-hack/check-seam.sh envs/prod/storage envs/prod/compute envs/prod/orchestration
+# compute:values-lake.yaml is a distinct RENDER STATE, not a fourth chart --
+# the conditional `lake` catalog (values-lake.yaml, Task 3 Decision 2) only
+# exists once that file is layered on top of values.yaml, and that's the
+# state prod actually runs once G2 (S3 creds) lands. The bare
+# envs/prod/compute pass above never renders it, so without this second
+# pass the gate never proves the render prod will really use is seam-clean.
+hack/check-seam.sh envs/prod/storage envs/prod/compute envs/prod/orchestration "envs/prod/compute:values-lake.yaml"
 
 for tier in "${TIERS[@]}"; do
   chart_dir="envs/prod/$tier"
@@ -33,6 +39,10 @@ for tier in "${TIERS[@]}"; do
   if [ -f "$chart_dir/values-kind.yaml" ]; then
     echo "== helm template + kubeconform ($tier, kind values) =="
     helm template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/values-kind.yaml" --include-crds | kubeconform "${KC_FLAGS[@]}" -
+  fi
+  if [ -f "$chart_dir/values-lake.yaml" ]; then
+    echo "== helm template + kubeconform ($tier, lake values -- the conditional G2 state) =="
+    helm template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/values-lake.yaml" --include-crds | kubeconform "${KC_FLAGS[@]}" -
   fi
 done
 

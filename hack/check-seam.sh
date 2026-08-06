@@ -8,8 +8,15 @@
 # check Task 2 (Lakekeeper/Trino dependency verify-first step) and the
 # Task 5 CI gate reuse -- one definition, not three copies.
 #
-# Usage: hack/check-seam.sh <chart-dir> [<chart-dir> ...]
+# Usage: hack/check-seam.sh <chart-dir>[:extra-values.yaml] [<chart-dir> ...]
 #   hack/check-seam.sh envs/prod/storage envs/prod/compute envs/prod/orchestration
+#   hack/check-seam.sh "envs/prod/compute:values-lake.yaml"   # a distinct
+#     values-layering STATE, not a different chart -- e.g. compute's
+#     conditional `lake` catalog (values-lake.yaml, Plan 5 Task 3 Decision
+#     2) only exists once that file is layered on top of values.yaml; the
+#     base-values render checked by the bare "envs/prod/compute" arg above
+#     never renders it, so it needs its own pass to actually prove the
+#     state prod will run once G2 lands is seam-clean too.
 #
 # Plain grep, deliberately -- the task brief's own Step 4 says "grep the
 # rendered output for cluster-scoped kinds"; a `kind:` line is always a
@@ -39,9 +46,16 @@ CLUSTER_SCOPED_KINDS=(
 KIND_PATTERN="^kind: ($(IFS='|'; echo "${CLUSTER_SCOPED_KINDS[*]}"))\$"
 
 fail=0
-for chart_dir in "$@"; do
-  echo "== seam gate: $chart_dir =="
-  rendered="$(helm template "$chart_dir" --include-crds)"
+for arg in "$@"; do
+  chart_dir="${arg%%:*}"
+  extra_values=""
+  helm_args=(template "$chart_dir" --include-crds)
+  if [ "$arg" != "$chart_dir" ]; then
+    extra_values="${arg#*:}"
+    helm_args=(template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/$extra_values" --include-crds)
+  fi
+  echo "== seam gate: $chart_dir${extra_values:+ (+ $extra_values)} =="
+  rendered="$(helm "${helm_args[@]}")"
   if [ -z "$rendered" ]; then
     echo "  (empty render -- nothing to check)"
     continue
