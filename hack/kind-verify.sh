@@ -226,8 +226,24 @@ if echo "$WH_LIST" | grep -q '"name":"default"'; then
 else
   echo "FAIL: lakekeeper warehouse 'default' not found (got: '$WH_LIST')"; exit 1
 fi
-# Hard gate (probe pattern per Task 2/3 reviews) — Prometheus STS name is
-# discovered by label, never hardcoded (chart-generated name can change).
+# Hard gate (probe pattern per Task 2/3 reviews). Queried over the network
+# via a throwaway curlimages/curl pod against `prometheus-operated` --
+# the prometheus-operator's own fixed-name headless Service for every
+# Prometheus it manages (NOT the chart-release-derived Service/STS name,
+# which per this comment's earlier version "can change"; `prometheus-
+# operated` is an even more stable target than that, since it needs no
+# label discovery at all). Switched off `kubectl exec ... wget` INTO the
+# prometheus container (Plan 5 Task 4 finish, live-caught 2026-08-06): the
+# 88.1.5 chart bump's default Prometheus image is `v3.13.2-distroless` --
+# no shell, no wget, no ls, nothing but the prometheus binary itself
+# (verified live: even `kubectl exec ... which` fails with "executable
+# file not found in $PATH") -- so the exec-based probe could never have
+# worked against this image and would have failed the very first time this
+# script ran post-bump. A network probe pod is also more robust than
+# fixing the exec target: it does not care what is or isn't inside the
+# Prometheus image, matching every other probe in this file's own
+# established pattern (rest-probe/warehouse-probe/oidc-discovery-probe
+# above).
 # Extended (Plan 2 Task 5): also asserts WorkflowFailed (the `datalake-
 # pipeline` PrometheusRule group, envs/prod/orchestration/templates/
 # datalake-alerts.yaml) loaded alongside the original `datalake` group's
@@ -235,15 +251,22 @@ fi
 # Plan 5 Task 1 split these into two PrometheusRule objects, one per
 # tier) -- proves BOTH tiers' rules hydrated, not just whichever happened
 # to already be present.
-PROM_STS=$(kubectl -n monitoring get sts -l app.kubernetes.io/name=prometheus -o jsonpath='{.items[0].metadata.name}')
-RULES_JSON=$(kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
-     wget -qO- 'http://localhost:9090/api/v1/rules')
+kubectl -n monitoring delete pod prom-rules-probe --ignore-not-found >/dev/null 2>&1
+kubectl -n monitoring run prom-rules-probe --restart=Never --image=curlimages/curl -- \
+  sh -c 'curl -s http://prometheus-operated.monitoring.svc:9090/api/v1/rules' >/dev/null
+for i in $(seq 1 30); do
+  phase=$(kubectl -n monitoring get pod prom-rules-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 2
+done
+RULES_JSON=$(kubectl -n monitoring logs prom-rules-probe 2>/dev/null || echo "")
+kubectl -n monitoring delete pod prom-rules-probe --ignore-not-found >/dev/null 2>&1
 if echo "$RULES_JSON" | grep -q LandingDBXidAgeHigh && echo "$RULES_JSON" | grep -q WorkflowFailed \
    && echo "$RULES_JSON" | grep -q IcebergSnapshotStale && echo "$RULES_JSON" | grep -q WorkflowChronicFailure \
    && echo "$RULES_JSON" | grep -q SiteSonarStale && echo "$RULES_JSON" | grep -q IcebergMaintenanceStale; then
   echo "alert rules loaded (datalake + datalake-pipeline groups, incl. IcebergSnapshotStale/WorkflowChronicFailure/SiteSonarStale/IcebergMaintenanceStale)"
 else
-  echo "FAIL: datalake alert rules not loaded in Prometheus (one or more of LandingDBXidAgeHigh/WorkflowFailed/IcebergSnapshotStale/WorkflowChronicFailure/SiteSonarStale/IcebergMaintenanceStale missing)"; exit 1
+  echo "FAIL: datalake alert rules not loaded in Prometheus (one or more of LandingDBXidAgeHigh/WorkflowFailed/IcebergSnapshotStale/WorkflowChronicFailure/SiteSonarStale/IcebergMaintenanceStale missing, or the probe itself failed -- got: '$RULES_JSON')"; exit 1
 fi
 
 # Hard gate (Plan 5 Task 4 -- brief: "Live-verify the CNPG `job` label
@@ -265,8 +288,16 @@ fi
 # because the PodMonitor happens to be named identically to the CNPG
 # Cluster it selects -- load-bearing on that naming choice, not a
 # CNPG-exporter guarantee. Reporting the actual observed values either way.
-CNPG_METRICS_JSON=$(kubectl -n monitoring exec "sts/$PROM_STS" -c prometheus -- \
-     wget -qO- 'http://localhost:9090/api/v1/query?query=cnpg_pg_replication_streaming_replicas')
+kubectl -n monitoring delete pod prom-cnpg-probe --ignore-not-found >/dev/null 2>&1
+kubectl -n monitoring run prom-cnpg-probe --restart=Never --image=curlimages/curl -- \
+  sh -c 'curl -s "http://prometheus-operated.monitoring.svc:9090/api/v1/query?query=cnpg_pg_replication_streaming_replicas"' >/dev/null
+for i in $(seq 1 30); do
+  phase=$(kubectl -n monitoring get pod prom-cnpg-probe -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
+  sleep 2
+done
+CNPG_METRICS_JSON=$(kubectl -n monitoring logs prom-cnpg-probe 2>/dev/null || echo "")
+kubectl -n monitoring delete pod prom-cnpg-probe --ignore-not-found >/dev/null 2>&1
 OBSERVED_JOBS=$(echo "$CNPG_METRICS_JSON" | grep -oE '"job":"[^"]*"' | sort -u | tr '\n' ' ')
 echo "Task 4 CNPG job-label live-verification -- cnpg_pg_replication_streaming_replicas observed job label values: ${OBSERVED_JOBS:-<none>}"
 if echo "$CNPG_METRICS_JSON" | grep -q '"job":"datalake-storage/mon-data"' \
