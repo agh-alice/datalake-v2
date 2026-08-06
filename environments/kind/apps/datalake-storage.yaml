@@ -1,0 +1,36 @@
+# Plan 5 Task 4: one of the three tier-mirroring Applications that replace
+# the old single-umbrella `datalake-kind` Application (environments/kind/
+# apps/datalake.yaml, deleted). Points at the SAME chart prod uses
+# (envs/prod/storage), differing only by values-kind.yaml -- the whole
+# point of this rework (brief: "the harness stops being a divergent rig
+# and becomes a mirror").
+#
+# Namespace `datalake-storage` is NOT created by this Application
+# (no CreateNamespace=true, unlike the retired operator Applications) --
+# on the prod tenant cluster the platform owns namespace creation; kind
+# mirrors that division of responsibility by having hack/kind-up.sh
+# pre-create all three `datalake-*` namespaces itself, before this
+# Application's first sync (same reasoning as that script's existing
+# lakekeeper/minio/dex/monitoring namespace pre-creation).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: datalake-storage
+  namespace: argocd
+spec:
+  project: datalake
+  sourceHydrator:
+    drySource:
+      repoURL: https://github.com/agh-alice/datalake-v2.git
+      targetRevision: main
+      path: envs/prod/storage
+      helm:
+        valueFiles: [values.yaml, values-kind.yaml]
+    syncSource:
+      targetBranch: environments/kind
+      path: envs/prod/storage
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [ServerSideApply=true]

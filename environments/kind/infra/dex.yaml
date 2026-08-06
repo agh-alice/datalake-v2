@@ -1,3 +1,10 @@
+# Kind-only (Plan 5 Task 4: moved from apps/infra/dex.yaml -- one of the
+# "five platform-owned Applications" the brief moves to a kind-only
+# location. The platform provides Dex in prod too (plan Context line), but
+# it is one of the operators kind still has to stand up for itself to get
+# real OIDC-discovery/Grafana-login coverage; nothing below changed by the
+# move except its path).
+#
 # Design decision D-Dex (deliverables/2026-07-12-datalake-v2-design.md,
 # OIDC provider row) + Plan 4 Task 1 Step 4: standalone Dex as its own small
 # apps/infra Application, decoupled from ArgoCD's own bundled Dex (which

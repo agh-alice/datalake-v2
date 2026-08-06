@@ -84,8 +84,12 @@ cd "$(dirname "$0")/.."
 # script (with trace.last_update, mon_jdls's old 2-col shape) must have its
 # PG fixture tables dropped before rerunning this script so CREATE TABLE
 # actually re-lays-out the production-parity schema.
-MD_PRIMARY=$(kubectl -n landing-db get cluster mon-data -o jsonpath='{.status.currentPrimary}')
-kubectl -n landing-db exec -i "$MD_PRIMARY" -- psql -U postgres -d mon_data -v ON_ERROR_STOP=1 <<'SQL'
+#
+# Namespace `datalake-storage` (Plan 5 Task 1 retargeted mon-data out of
+# the old umbrella chart's dedicated `landing-db` namespace into the
+# merged storage-tier namespace; Task 4 updated this script to follow).
+MD_PRIMARY=$(kubectl -n datalake-storage get cluster mon-data -o jsonpath='{.status.currentPrimary}')
+kubectl -n datalake-storage exec -i "$MD_PRIMARY" -- psql -U postgres -d mon_data -v ON_ERROR_STOP=1 <<'SQL'
 SELECT setseed(0.42);
 
 CREATE TABLE IF NOT EXISTS job_info (

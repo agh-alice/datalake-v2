@@ -1,8 +1,57 @@
-# environment: kind -- placeholder only.
-#
-# Plan 5 Task 1 (this split) deliberately does not port the old
-# chart/values-kind.yaml's landingDb overrides (instances: 1, storageSize:
-# 2Gi) here: Task 4 reworks the kind harness to mirror the tenant topology
-# (three Applications, one per tier, against envs/prod/<tier> +
-# values-kind.yaml) and is where this file gets populated for real. Until
-# then this file intentionally renders no overrides.
+# environment: kind -- Task 4 population (Plan 5's kind-mirrors-prod
+# rework). The datalake-storage Application renders this chart with
+# `-f values.yaml -f values-kind.yaml`, same charts prod uses, values-only
+# divergence per the plan's Global Constraints.
+
+# Placement (brief: "prefer labelling the kind nodes... placement is
+# actually tested for real"). hack/kind-up.sh labels the kind worker node
+# `pool=db` -- this override makes both CNPG clusters actually schedule
+# via that real nodeSelector match instead of a values-neutralised no-op.
+# Tolerations are emptied deliberately, NOT copied from values.yaml's
+# `dedicated=database:NoSchedule`: kind's single worker carries the LABEL
+# but not the TAINT (a 2-node kind cluster -- control-plane + one worker --
+# has nowhere else for the operators/compute/orchestration workloads to
+# run if that single worker were tainted; see task-4-report.md for the
+# full reasoning). A toleration for a taint that doesn't exist is a
+# harmless no-op either way, but stating `tolerations: []` here is more
+# honest about what's actually being tested on kind (nodeSelector, not the
+# taint).
+placement:
+  nodeSelector:
+    pool: db
+  tolerations: []
+
+# Lakekeeper's catalog.nodeSelector/tolerations duplicate the
+# top-level `placement:` block by hand (values.yaml's own comment:
+# subchart values are plain data, not cross-referenceable) -- same
+# override, same reasoning as `placement:` above.
+lakekeeper:
+  catalog:
+    nodeSelector:
+      pool: db
+    tolerations: []
+
+# Restored (Task 4) from the pre-split chart/values-kind.yaml (git history:
+# commit 1466141^): a single small instance keeps kind's landing DB cheap.
+# storageClass overridden below regardless of instance count -- kind has no
+# `cinder-perf`.
+landingDb:
+  instances: 1
+  storageSize: 2Gi
+  storageClass: local-path
+
+# lakekeeperDb keeps values.yaml's default instance count (2) -- unlike
+# landingDb this was NOT one of the deferred kind overrides Task 1 called
+# out, and running it at 2 instances on kind is deliberately useful for
+# Task 4's own CNPG `job`-label live-verification gate (brief: "Once kind
+# is up with both database clusters, query Prometheus...") -- 2 instances
+# means lakekeeper-db's CNPGClusterUnhealthy rule (envs/prod/storage/
+# templates/datalake-alerts.yaml's `{{- if gt (int .Values.lakekeeperDb.
+# instances) 1 }}` guard) actually renders on kind too, not just in prod.
+# storageClass overridden (no cinder-perf on kind); storageSize shrunk --
+# "sizes can be small on kind" (brief) -- the same catalog-DB working set
+# that fits `values.yaml`'s prod default (5Gi/instance) fits easily in 1Gi
+# on a synthetic-fixture-scale kind cluster.
+lakekeeperDb:
+  storageClass: local-path
+  storageSize: 1Gi

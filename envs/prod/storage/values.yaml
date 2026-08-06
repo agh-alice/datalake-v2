@@ -25,10 +25,13 @@ placement:
       effect: NoSchedule
 
 # Plan 5 Task 3 Step 4 (secrets): gates the ExternalSecret templates in this
-# chart (templates/external-secrets.yaml) so kind keeps using
-# hack/kind-up.sh-provisioned plain Secrets instead of racing an
-# ExternalSecret controller that has no `platform` ClusterSecretStore to
-# resolve against. values-kind.yaml (Task 4) must override this to false.
+# chart (templates/external-secrets.yaml). Superseding note (Task 4): kind
+# now runs its OWN `platform` ClusterSecretStore (ESO Kubernetes provider,
+# hack/kind-up.sh provisions the backing Secrets in namespace
+# eso-secret-source) -- deliberately the same store NAME as production, so
+# the ExternalSecret objects these charts render are byte-identical across
+# environments (the whole point of the fidelity exercise). values-kind.yaml
+# does NOT override this to false; it stays true on kind too.
 externalSecrets:
   enabled: true
 

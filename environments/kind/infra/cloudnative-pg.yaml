@@ -1,3 +1,6 @@
+# Kind-only (Plan 5 Task 4: moved from apps/infra/cloudnative-pg.yaml --
+# the platform provides CloudNativePG 1.30 in prod, per the plan's Context
+# line; this Application is how kind gets the same operator).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -9,7 +12,11 @@ spec:
   source:
     repoURL: https://cloudnative-pg.github.io/charts
     chart: cloudnative-pg
-    targetRevision: "0.28.0"
+    # 0.29.0 (appVersion 1.30.0) is newest stable per `helm search repo
+    # cnpg/cloudnative-pg --versions`, verified 2026-08-06 -- matches the
+    # platform's own CloudNativePG 1.30 (plan Context line), was 0.28.0
+    # (appVersion 1.29.1) before this bump.
+    targetRevision: "0.29.0"
     helm:
       valuesObject:
         resources:

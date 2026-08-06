@@ -1,0 +1,51 @@
+# Kind-only (Plan 5 Task 4: moved from apps/infra/argo-workflows.yaml --
+# the platform provides Argo Workflows v4.0.8, scoped to
+# datalake-orchestration, per the plan's Context line; this Application is
+# how kind gets the same operator, wired the same way).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-workflows
+  namespace: argocd
+  annotations: {argocd.argoproj.io/sync-wave: "1"}
+spec:
+  project: datalake
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-workflows
+    # 1.0.23 (appVersion v4.0.8) is newest stable per `helm search repo
+    # argo/argo-workflows --versions`, verified 2026-08-06 -- matches the
+    # platform's own Argo Workflows v4.0.8 (plan Context line), was 1.0.19
+    # (appVersion v4.0.7) before this bump. Prometheus CRDs already exist
+    # on this kind cluster by the time this Application syncs (sync-wave
+    # ordering vs. monitoring, same caveat as before: eventual convergence
+    # via selfHeal, not a hard guarantee -- see environments/kind/
+    # argocd-values.yaml's comment), so controller.serviceMonitor.enabled:
+    # true is safe here.
+    targetRevision: "1.0.23"
+    helm:
+      valuesObject:
+        controller:
+          metricsConfig: {enabled: true}
+          serviceMonitor: {enabled: true}
+          # Task 4 fix (brief: "scoped to the orchestration namespace --
+          # the chart default [\"default\"] would silently never run our
+          # CronWorkflows"): confirmed live against the pulled chart's own
+          # values.yaml (`helm show values argo/argo-workflows --version
+          # 1.0.23`, 2026-08-06) -- `controller.workflowNamespaces`
+          # defaults to `[default]`, not cluster-wide. Every CronWorkflow/
+          # Workflow this repo renders lives in `datalake-orchestration`
+          # (Plan 5 Task 1's namespace retarget) -- without this override
+          # the controller would watch namespace `default` (where nothing
+          # of ours exists) and every CronWorkflow tick would silently
+          # never fire, no error, nothing to alert on.
+          workflowNamespaces: [datalake-orchestration]
+        workflow:
+          serviceAccount: {create: false}
+        server:
+          enabled: true
+          authModes: [server]
+  destination: {server: https://kubernetes.default.svc, namespace: argo-workflows}
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true]

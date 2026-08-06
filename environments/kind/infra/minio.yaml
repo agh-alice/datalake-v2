@@ -1,3 +1,8 @@
+# Plan 5 Task 4: moved from environments/kind/apps/minio.yaml into
+# environments/kind/infra/ alongside the other kind-only operators
+# (apps/ now holds only the three tier-mirroring Applications) -- no
+# content change, still the S3 stand-in named in the plan's Task 4 Step 1
+# ("MinIO likewise stays kind-only").
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -8,8 +13,9 @@ spec:
   source:
     repoURL: https://charts.min.io/
     chart: minio
-    # 5.4.0 is newest per `helm search repo minio/minio --versions` (Task 1,
-    # Plan 2). kind-only stand-in for S3 -- not deployed on cyfronet.
+    # 5.4.0 still newest per `helm search repo minio/minio --versions`,
+    # re-checked 2026-08-06 (Task 1, Plan 2 original pin unchanged).
+    # kind-only stand-in for S3 -- not deployed on the prod tenant cluster.
     targetRevision: "5.4.0"
     helm:
       valuesObject:

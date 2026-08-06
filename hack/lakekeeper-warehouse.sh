@@ -12,8 +12,10 @@ cd "$(dirname "$0")/.."
 # be reached from inside the cluster (same reason kind-verify.sh's REST probe
 # uses a pod). Namespace `minio` (not `lakekeeper`) is deliberate: it lets the
 # pod pull minio-creds via secretKeyRef without duplicating the Secret across
-# namespaces. Cross-namespace Service DNS (lakekeeper.lakekeeper.svc) is
-# unaffected by which namespace the pod runs in -- verified interactively.
+# namespaces. Cross-namespace Service DNS (lakekeeper.datalake-storage.svc --
+# Plan 5 Task 1 retargeted Lakekeeper from its own dedicated `lakekeeper`
+# namespace into the merged storage-tier namespace) is unaffected by which
+# namespace the pod runs in -- verified interactively.
 # Credential values never touch this host script, its logs, or the terminal:
 # they flow Secret -> pod env -> curl body entirely inside the cluster.
 kubectl -n minio delete pod lakekeeper-warehouse-bootstrap --ignore-not-found >/dev/null 2>&1
@@ -44,7 +46,7 @@ spec:
         - -c
         - |
           set -e
-          LK=http://lakekeeper.lakekeeper.svc:8181
+          LK=http://lakekeeper.datalake-storage.svc:8181
           AUTH='Authorization: Bearer dummy'
           # Guarded wait (brief requirement): right after `kubectl apply`,
           # ArgoCD sync + pod startup latency means the Service may not answer

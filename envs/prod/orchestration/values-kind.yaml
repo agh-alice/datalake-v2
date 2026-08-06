@@ -1,9 +1,66 @@
-# environment: kind -- placeholder only.
+# environment: kind -- Task 4 population, restoring the pre-split
+# chart/values-kind.yaml overrides (commit 1466141^) that Task 1
+# deliberately deferred to this task.
+
+# hello CronWorkflow: kind-verify's manual workflow-execution canary
+# depends on this (values.yaml's comment). Base default stays false so
+# prod never runs it.
+helloCron:
+  enabled: true
+
+# echo-receiver: kind-only Slack-webhook stand-in the platform's
+# Alertmanager (environments/kind/infra/monitoring.yaml -- kind-only,
+# installs the same kube-prometheus-stack the platform provides in prod)
+# posts to. Base default stays false so prod never runs it (prod gets a
+# real Slack webhook via ESO once the owner provides one).
+echoReceiver:
+  enabled: true
+
+# CronWorkflow scheduling: restored from the pre-split chart/
+# values-kind.yaml lineage, WITH ONE DELIBERATE DEVIATION from that
+# history -- see the `sitesonar` comment below.
 #
-# Plan 5 Task 1 (this split) deliberately does not port the old
-# chart/values-kind.yaml's helloCron.enabled/echoReceiver.enabled/ingest
-# schedule overrides here: Task 4 reworks the kind harness to mirror the
-# tenant topology (three Applications, one per tier, against
-# envs/prod/<tier> + values-kind.yaml) and is where this file gets
-# populated for real. Until then this file intentionally renders no
-# overrides.
+# nightly: tightened to every 6h (vs. prod's once-daily 02:00) purely for
+# kind-cluster observability (`kubectl get cronworkflow -w` shows a tick
+# within a working session). Safe to tighten: run-nightly/run-retention/
+# check-freshness only touch the in-cluster landing DB + Iceberg/MinIO,
+# no external network call, no unbounded-fetch risk.
+#
+# sitesonar: LEFT AT PROD'S DEFAULT (unset here -- inherits values.yaml's
+# `0 3 * * *`), NOT restored to the historical `30 */6 * * *`. This is a
+# deliberate deviation from the plan's literal "restore the old
+# values-kind.yaml overrides" instruction -- flagging it here loudly
+# rather than silently matching the letter of the instruction while
+# dropping what made it safe.
+#
+# Why: the historical tightened sitesonar schedule was only ever safe
+# because hack/kind-up.sh (pre-ESO) set `SITESONAR_LIMIT=5` directly in
+# the plaintext `ingest-env` Secret it created by hand -- `alice_ingest.
+# sitesonar._resolve_limit()`'s only bound on a FIRST-EVER run (no dlt
+# high-water-mark state yet) against the real, live alimonitor.cern.ch
+# backlog (verified reachable from this host, 2026-08-06 -- 1740+ files,
+# tens of GB decompressed per sitesonar.py's own module docstring). Task 3
+# moved `ingest-env` onto a real ExternalSecret (templates/
+# external-secrets.yaml) whose `data:` list enumerates exactly 10 fields
+# and deliberately does NOT include SITESONAR_LIMIT (that file's own
+# comment: "production must run the real, unbounded backlog drain") --
+# and that template is out of Task 4's file scope (apps/infra/*,
+# apps/project.yaml, environments/kind/**, hack/*.sh, Makefile, and the
+# three values-kind.yaml placeholders only). There is therefore no
+# in-scope way left to thread a bounded SITESONAR_LIMIT into the
+# ESO-sourced ingest-env Secret at all.
+#
+# This host has ~25Gi free disk (Task 4 constraint) -- an unbounded first
+# sitesonar tick landing every 6h would risk filling it. Left at prod's
+# daily cadence instead: still a real residual risk on a kind cluster left
+# running past 03:00, but 4x less exposure than every 6h, and `hack/
+# run-ingest-once.sh` never invokes run-sitesonar itself, so the
+# clean-room acceptance sequence (kind-up -> seed-fixture ->
+# run-ingest-once -> kind-verify) does not depend on it firing at all.
+# FOLLOW-UP (flagging for Task 3/5, not fixed here): add a values-gated
+# extra key (or a plain, non-secret env var) to templates/
+# ingest-cronworkflows.yaml / templates/external-secrets.yaml so kind can
+# re-restore the tight schedule with its safety valve intact.
+ingest:
+  schedules:
+    nightly: "0 */6 * * *"

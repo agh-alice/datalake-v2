@@ -23,10 +23,16 @@ helloCron:
     requests: {cpu: 10m, memory: 16Mi}
     limits: {memory: 32Mi}
 
-# Plan 5 Task 3 Step 4: gates templates/external-secrets.yaml so kind
-# keeps using hack/kind-up.sh-provisioned plain Secrets instead of an
-# ExternalSecret controller with no `platform` ClusterSecretStore to
-# resolve against. values-kind.yaml (Task 4) must override this to false.
+# Plan 5 Task 3 Step 4: gates templates/external-secrets.yaml. Superseding
+# note (Task 4): kind runs its own `platform` ClusterSecretStore (see
+# envs/prod/storage/values.yaml's identical note) -- values-kind.yaml does
+# NOT override this to false; it stays true on kind too, same store name
+# as production. One gap this does NOT close: SITESONAR_LIMIT (below) has
+# no ExternalSecret data: entry (deliberately, per the Env-var contract
+# note further down -- prod must run the real unbounded backlog), and
+# Task 4's file scope doesn't extend to this chart's templates/, so kind
+# cannot thread a bounded value through the ESO path either. See
+# hack/kind-up.sh and values-kind.yaml for how Task 4 compensates.
 externalSecrets:
   enabled: true
 

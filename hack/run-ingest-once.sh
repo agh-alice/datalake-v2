@@ -3,10 +3,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # One-shot ingestion Workflow (Plan 2 Task 3): submits a Workflow running
 # `alice-ingest run-nightly` (image ENTRYPOINT + this args list) under the
-# pipeline-runner ServiceAccount, envFrom Secret ingest-env (hack/kind-up.sh
-# Step 2), and hard-gates on it reaching Succeeded. Image comes from
-# chart/values.yaml `images.ingest` via yq -- same digest-pinned image the
-# CronWorkflow will use once Task 4 wires it up.
+# pipeline-runner ServiceAccount, envFrom Secret ingest-env, and
+# hard-gates on it reaching Succeeded. Image comes from envs/prod/
+# orchestration/values.yaml `images.ingest` via yq -- same digest-pinned
+# image the CronWorkflow uses (Plan 5 Task 1 retargeted the orchestration
+# tier's chart from the deleted `chart/` path to `envs/prod/orchestration`;
+# namespace retargeted from `argo-workflows` to `datalake-orchestration`,
+# same task).
 #
 # create -o name / poll-that-name / hard-gate pattern, same shape as
 # hack/kind-verify.sh's manual workflow probe: querying items[-1] sorted by
@@ -31,19 +34,27 @@ cd "$(dirname "$0")/.."
 # any number of times (matches this script's own existing idempotency for
 # run-nightly's merge/upsert tables).
 #
+# `--strict` (Plan 5 Task 4 acceptance line): `apply-views --strict` is
+# Plan 4's own cutover-gate invocation (pipeline.py's run_apply_views(),
+# views.py's module docstring) -- exits non-zero on actionable jdl__ drift
+# instead of merely logging it. Running it here too means kind-verify's
+# clean-room acceptance run exercises the SAME strict gate the real
+# cutover will use, not a weaker variant.
+#
 # Submits one Workflow running `alice-ingest <args...>`, waits up to 600s
 # for a terminal phase, dumps its pod logs, and hard-gates on Succeeded.
 # Factored into a function once this script needed to submit a SECOND
 # Workflow (apply-views, above) rather than duplicate the whole create/
 # poll/logs/gate block a second time.
-IMAGE=$(yq -r '.images.ingest' chart/values.yaml)
+IMAGE=$(yq -r '.images.ingest' envs/prod/orchestration/values.yaml)
+NAMESPACE=datalake-orchestration
 
 run_workflow() {
   local generate_name=$1
   local args_yaml=$2
 
   local wf_ref
-  wf_ref=$(kubectl -n argo-workflows create -o name -f - <<EOF
+  wf_ref=$(kubectl -n "$NAMESPACE" create -o name -f - <<EOF
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata: {generateName: ${generate_name}-}
@@ -72,13 +83,13 @@ EOF
 
   local phase=""
   for _ in $(seq 1 120); do
-    phase=$(kubectl -n argo-workflows get "$wf_ref" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+    phase=$(kubectl -n "$NAMESPACE" get "$wf_ref" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
     { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ] || [ "$phase" = "Error" ]; } && break
     sleep 5
   done
 
   echo "=== $wf_name pod logs (container: main) ==="
-  kubectl -n argo-workflows logs "$wf_name" -c main --timestamps 2>&1 || true
+  kubectl -n "$NAMESPACE" logs "$wf_name" -c main --timestamps 2>&1 || true
 
   if [ "$phase" != "Succeeded" ]; then
     echo "FAIL: $wf_name phase='$phase' (timeout 600s)"
@@ -88,4 +99,4 @@ EOF
 }
 
 run_workflow "ingest-manual" '["run-nightly"]'
-run_workflow "apply-views-manual" '["apply-views"]'
+run_workflow "apply-views-manual" '["apply-views", "--strict"]'

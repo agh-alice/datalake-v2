@@ -1,8 +1,8 @@
 .DEFAULT_GOAL := help
 .PHONY: lint kind-up kind-down kind-verify sops-setup help
-lint: ## helm lint + template render + kubeconform (both envs)
+lint: ## helm dependency build + lint + template render + kubeconform (3 tier charts, prod + kind values)
 	hack/lint.sh
-kind-up: ## kind cluster + ArgoCD (hydrator on) + apps
+kind-up: ## kind cluster + ArgoCD (hydrator on) + operators (mirrors platform) + 3 tier apps
 	hack/kind-up.sh
 kind-down: ## delete kind cluster
 	kind delete cluster --name datalake-v2

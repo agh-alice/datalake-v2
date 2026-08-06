@@ -1,6 +1,105 @@
-# environment: kind -- placeholder only.
-#
-# Plan 5 Task 1 does not populate kind-specific values: this chart has no
-# templates yet (Trino arrives in Task 2), and the kind harness itself is
-# reworked to mirror the tenant topology in Task 4. Until then this file
-# intentionally renders no overrides.
+# environment: kind -- Task 4 population.
+
+trino:
+  # Image digest override (NOT a values.yaml bug -- a genuine, verified
+  # hardware constraint). values.yaml pins Trino 480 (appVersion 480,
+  # ubi10-micro runtime base, requires x86-64-v3/AVX2 -- see that file's
+  # `image:` comment). This kind host's real CPU does NOT have AVX2
+  # (verified live, Task 4, 2026-08-06: `grep flags /proc/cpuinfo` shows
+  # `avx` but no `avx2`/`bmi1`/`bmi2`/`fma`, and `docker run --rm
+  # --entrypoint /bin/sh trinodb/trino@<480 digest> -c 'echo ok'` fails
+  # with `Fatal glibc error: CPU does not support x86-64-v3` -- reproduced
+  # directly, not assumed from the historical comment trail). Pinned back
+  # to the same Trino 476 digest the pre-split chart used on kind
+  # (chart/values-kind.yaml history, commit dc1c0ab^'s apps/infra/
+  # trino.yaml: ubi9-micro base, x86-64-v2, confirmed still pullable and
+  # runnable on this host the same way, 2026-08-06). This is a kind-only
+  # divergence forced by this host's virtualized CPU, not a value judgment
+  # about which Trino release is "right" -- prod's real ccs1.large nodes
+  # are x86-64-v3 (Plan 5 context) and keep the newest pin in values.yaml.
+  image:
+    digest: "sha256:00125e40d063bc4816d165482f6044872b18b56026fb959d3b28ce1f96ffbbee"
+
+  # Placement neutralised, NOT labelled to match (the one exception to the
+  # brief's "prefer labelling" guidance, and a deliberate one -- see
+  # task-4-report.md). values.yaml's `cpu: x86-64-v3` nodeSelector plus its
+  # nodeAffinity exclusion both assume real x86-64-v3 hardware exists
+  # somewhere in the cluster to select. Labelling the kind worker
+  # `cpu: x86-64-v3` would be FALSE (this host lacks AVX2, verified above)
+  # and would actively route the coordinator onto a node its own pinned
+  # image can't execute on if the image override above were ever dropped
+  # by mistake -- worse than a no-op selector, an actively misleading one.
+  # Neutralising is the honest choice here: kind cannot exercise this
+  # selector for real without lying about its own hardware.
+  # `null`, not `{}` -- an empty map merges as a no-op against
+  # values.yaml's already-set `{cpu: x86-64-v3}` (Helm's deep-merge only
+  # overrides keys present in the overriding map; `{}` has none, so the
+  # original survives untouched -- caught empirically, Task 4: `helm
+  # template` with `{}` here still rendered `nodeSelector: {cpu:
+  # x86-64-v3}` on kind). `null` actually deletes the key -- this is a
+  # plain two-user-values-file merge (envs/prod/compute/values.yaml and
+  # this file, both at the chart's own top level), NOT the broken
+  # subchart-default-deletion path values.yaml's `catalogs:` comment
+  # documents (that bug is specifically about deleting a key the trino
+  # SUBCHART itself defaults; `coordinator.nodeSelector`/`affinity` are
+  # keys OUR OWN values.yaml sets, not a trino subchart default, so a
+  # plain top-level null override applies normally).
+  coordinator:
+    nodeSelector: null
+    affinity: null
+    config:
+      nodeScheduler:
+        includeCoordinator: true
+    # Kind-sized (resource-frugality, not the prod 2 CPU / 4-10Gi figures
+    # sized against cyfronet-cluster-requirements.md's real-workload
+    # estimate) -- restored from the pre-split chart/values-kind.yaml
+    # lineage (apps/infra/trino.yaml, commit dc1c0ab^): 2G JVM heap, memory
+    # limit above it for off-heap/native headroom (standard JVM-in-
+    # container sizing), same reasoning values.yaml's own resources
+    # comment uses for its 8G-heap/10Gi-limit pair.
+    jvm:
+      maxHeapSize: "2G"
+    resources:
+      requests: {cpu: 250m, memory: 1536Mi}
+      limits: {memory: 3Gi}
+
+  # The `lake` catalog: values.yaml deliberately omits this key (Decision
+  # 2 -- conditional on real Cyfronet S3 values via values-lake.yaml, not
+  # yet known). Kind has its own S3 stand-in (MinIO, environments/kind/
+  # infra/minio.yaml) and a real end-to-end ingestion proof needs a `lake`
+  # catalog to write to -- added here instead of layering values-lake.yaml
+  # (whose `<cyfronet-s3-endpoint>`/`<cyfronet-s3-region>` placeholders
+  # would fail every query, and whose real values are still TO VERIFY per
+  # Plan 4 gate G2). Content restored from the pre-split chart/
+  # values-kind.yaml lineage (apps/infra/trino.yaml, commit dc1c0ab^),
+  # lakekeeper URI's namespace updated `lakekeeper.lakekeeper.svc` ->
+  # `lakekeeper.datalake-storage.svc` for Plan 5 Task 1's namespace merge
+  # (matches envs/prod/storage/values.yaml's `lakekeeper.fullnameOverride:
+  # lakekeeper` + this same chart's own `catalogs.landing` block, already
+  # retargeted the same way).
+  #
+  # Coordinator review finding (Task 2/3 review, relayed live to Task 4):
+  # this file necessarily touches other keys under `trino:` too (image,
+  # coordinator, above) -- ANY second `-f` values file touching `trino:`
+  # flips Helm's dependency-values coalescing so values.yaml's
+  # `tpch: null`/`tpcds: null` deletions DO propagate (empirically
+  # confirmed by the reviewer against this exact chart+dependency shape,
+  # not the earlier "never propagates" read). Consequence: kind's rendered
+  # catalog set is expected to be {lake, landing, system} -- no demo
+  # catalogs -- unlike a single-file render (landing/tpch/tpcds/system).
+  # hack/kind-verify.sh's SHOW CATALOGS gate asserts the allowlist +
+  # required-pair shape (brief), which passes either way; it does not
+  # assume one outcome over the other.
+  catalogs:
+    lake: |
+      connector.name=iceberg
+      iceberg.catalog.type=rest
+      iceberg.rest-catalog.uri=http://lakekeeper.datalake-storage.svc:8181/catalog
+      iceberg.rest-catalog.warehouse=default
+      iceberg.rest-catalog.security=OAUTH2
+      iceberg.rest-catalog.oauth2.token=dummy
+      iceberg.rest-catalog.vended-credentials-enabled=true
+      fs.native-s3.enabled=true
+      s3.endpoint=http://minio.minio.svc:9000
+      s3.region=local-01
+      s3.path-style-access=true

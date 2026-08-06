@@ -1,0 +1,42 @@
+# Kind-only AppProject (Plan 5 Task 4: moved from apps/project.yaml, which
+# no longer exists -- there is nothing left under `apps/` that applies to
+# prod. The platform owns the REAL tenant AppProject on alice-k8s-datalake
+# (bounded by `clusterResourceWhitelist: []` and the three namespace
+# destinations, per the plan's Global Constraints) -- that resource is
+# platform-managed, not defined in this repo. This Project only scopes
+# kind's OWN local ArgoCD instance, which still needs to install
+# cluster-scoped operator CRDs (CloudNativePG, External Secrets, Argo
+# Workflows, kube-prometheus-stack) that the platform installs for real
+# prod -- hence the wide-open `clusterResourceWhitelist: [*]` below,
+# unchanged from before the split: kind is a full sandbox, not a seam
+# rehearsal of the AppProject restriction itself.
+#
+# sourceRepos: lakekeeper's and trino's chart repos stay listed even
+# though neither is a standalone Application source any more (Plan 5
+# Task 2 absorbed both as `dependencies:` inside envs/prod/{storage,
+# compute}/Chart.yaml) -- ArgoCD's repo-server still needs to reach them
+# to run `helm dependency build` when rendering those two tier charts,
+# and leaving them documented here costs nothing.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: datalake
+  namespace: argocd
+spec:
+  description: ALICE datalake v2 -- kind harness project (mirrors the tenant topology; see environments/kind/apps/ and environments/kind/infra/)
+  sourceRepos:
+    - https://github.com/agh-alice/datalake-v2.git
+    - https://cloudnative-pg.github.io/charts
+    - https://charts.external-secrets.io
+    - https://prometheus-community.github.io/helm-charts
+    - https://argoproj.github.io/argo-helm
+    - https://lakekeeper.github.io/lakekeeper-charts/
+    - https://charts.min.io/
+    - https://trinodb.github.io/charts
+    - https://charts.dexidp.io
+  destinations:
+    - namespace: '*'
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: '*'
+      kind: '*'

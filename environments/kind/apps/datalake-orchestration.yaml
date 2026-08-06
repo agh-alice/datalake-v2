@@ -1,7 +1,10 @@
+# Plan 5 Task 4 -- see datalake-storage.yaml's header comment for the
+# shared rationale (tier-mirroring Application, no CreateNamespace=true,
+# same reasons).
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: datalake-kind
+  name: datalake-orchestration
   namespace: argocd
 spec:
   project: datalake
@@ -9,14 +12,14 @@ spec:
     drySource:
       repoURL: https://github.com/agh-alice/datalake-v2.git
       targetRevision: main
-      path: chart
+      path: envs/prod/orchestration
       helm:
         valueFiles: [values.yaml, values-kind.yaml]
     syncSource:
       targetBranch: environments/kind
-      path: chart
+      path: envs/prod/orchestration
   destination:
     server: https://kubernetes.default.svc
   syncPolicy:
     automated: {prune: true, selfHeal: true}
-    syncOptions: [CreateNamespace=true, ServerSideApply=true]
+    syncOptions: [ServerSideApply=true]

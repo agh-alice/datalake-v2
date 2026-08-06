@@ -18,16 +18,27 @@ dex:
 #
 # Task 8 review finding (correcting the claim this comment used to make): there
 # is no mechanically enforced ordering ("sync-wave ordering") that guarantees
-# the Prometheus-operator CRDs exist before datalake-kind renders that
-# ServiceMonitor -- ArgoCD Applications applied as standalone objects (as
-# apps/infra/*.yaml and environments/kind/apps/*.yaml are here) each sync
-# independently; sync-wave annotations only order resources within a single
-# Application's own sync, not across separate Applications. Convergence
-# instead relies on `syncPolicy.automated.selfHeal: true` (set on every
-# Application in this repo): a sync that fails because a CRD is missing gets
-# retried automatically, and once kube-prometheus-stack installs the CRD the
-# next selfHeal pass on datalake-kind succeeds. Treat this as eventual
-# convergence, not guaranteed ordering.
+# the Prometheus-operator CRDs exist before a tier Application's own
+# ServiceMonitor/PodMonitor/PrometheusRule resources render -- ArgoCD
+# Applications applied as standalone objects (as environments/kind/infra/*.yaml
+# and environments/kind/apps/*.yaml are here) each sync independently;
+# sync-wave annotations only order resources within a single Application's
+# own sync, not across separate Applications. Convergence instead relies on
+# `syncPolicy.automated.selfHeal: true` (set on every Application in this
+# repo): a sync that fails because a CRD is missing gets retried
+# automatically, and once kube-prometheus-stack installs the CRD the next
+# selfHeal pass succeeds. Treat this as eventual convergence, not guaranteed
+# ordering.
+#
+# Plan 5 Task 1 retired chart/templates/argocd-servicemonitor.yaml outright
+# (platform owns namespaces; ArgoCD is hub-side in prod, so a tenant chart
+# monitoring THIS repo's own kind-local ArgoCD makes no sense as a real
+# design). Nothing renders a ServiceMonitor for kind's ArgoCD any more --
+# `controller.metrics.enabled: true` below still exposes the endpoint for
+# a human to port-forward and inspect, but no PrometheusRule/ServiceMonitor
+# in this repo depends on it (the correction above's older claim that "the
+# ServiceMonitor lives in chart/templates instead" is stale as of that
+# retirement; left uncorrected in git history, corrected here).
 controller:
   metrics:
     enabled: true

@@ -49,8 +49,8 @@ fi
 # instead. Cyfronet's real S3 may or may not hit the same gap; per-object
 # delete is slower but safe everywhere, so it stays the only path here
 # rather than special-casing by environment.
-INGEST_IMAGE=$(yq -r '.images.ingest' chart/values.yaml)
-kubectl -n argo-workflows delete pod reset-pipeline --ignore-not-found >/dev/null 2>&1
+INGEST_IMAGE=$(yq -r '.images.ingest' envs/prod/orchestration/values.yaml)
+kubectl -n datalake-orchestration delete pod reset-pipeline --ignore-not-found >/dev/null 2>&1
 # Single-quoted delimiter (fully literal) + sed placeholder substitution --
 # same pattern as hack/lakekeeper-warehouse.sh, and for the same reason: an
 # unquoted heredoc lets the shell evaluate `$...`/backtick pairs anywhere in
@@ -61,7 +61,7 @@ kubectl -n argo-workflows delete pod reset-pipeline --ignore-not-found >/dev/nul
 # found", harmless only because the result lands inside a Python comment).
 # Quoting the delimiter turns the whole body inert to the shell; the one
 # real host-side variable (the image ref) is injected via sed instead.
-cat <<'PODYAML' | sed "s|__INGEST_IMAGE__|${INGEST_IMAGE}|" | kubectl -n argo-workflows apply -f -
+cat <<'PODYAML' | sed "s|__INGEST_IMAGE__|${INGEST_IMAGE}|" | kubectl -n datalake-orchestration apply -f -
 apiVersion: v1
 kind: Pod
 metadata:
@@ -150,12 +150,12 @@ spec:
 PODYAML
 phase=""
 for _ in $(seq 1 60); do
-  phase=$(kubectl -n argo-workflows get pod reset-pipeline -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+  phase=$(kubectl -n datalake-orchestration get pod reset-pipeline -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
   { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
   sleep 5
 done
-LOGS=$(kubectl -n argo-workflows logs reset-pipeline 2>/dev/null || echo "")
-kubectl -n argo-workflows delete pod reset-pipeline --ignore-not-found >/dev/null 2>&1
+LOGS=$(kubectl -n datalake-orchestration logs reset-pipeline 2>/dev/null || echo "")
+kubectl -n datalake-orchestration delete pod reset-pipeline --ignore-not-found >/dev/null 2>&1
 echo "$LOGS"
 if [ "$phase" = "Succeeded" ] && echo "$LOGS" | grep -q "reset-pipeline: OK"; then
   echo "reset-pipeline.sh: OK -- alice namespace + S3 prefix wiped, safe to rerun ingestion from a clean slate"
