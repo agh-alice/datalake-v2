@@ -248,6 +248,15 @@ spec:
         pool: db
       restartPolicy: Always
       serviceAccountName: lakekeeper
+      tolerations:
+        - effect: NoExecute
+          key: node.kubernetes.io/not-ready
+          operator: Exists
+          tolerationSeconds: 300
+        - effect: NoExecute
+          key: node.kubernetes.io/unreachable
+          operator: Exists
+          tolerationSeconds: 300
 ---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -258,7 +267,15 @@ spec:
   affinity:
     nodeSelector:
       pool: db
-    tolerations: null
+    tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 300
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 300
   bootstrap:
     initdb:
       database: lakekeeper
@@ -284,7 +301,15 @@ spec:
   affinity:
     nodeSelector:
       pool: db
-    tolerations: null
+    tolerations:
+      - effect: NoExecute
+        key: node.kubernetes.io/not-ready
+        operator: Exists
+        tolerationSeconds: 300
+      - effect: NoExecute
+        key: node.kubernetes.io/unreachable
+        operator: Exists
+        tolerationSeconds: 300
   bootstrap:
     initdb:
       database: mon_data
@@ -551,3 +576,12 @@ spec:
         pool: db
       restartPolicy: OnFailure
       serviceAccountName: lakekeeper
+      tolerations:
+        - effect: NoExecute
+          key: node.kubernetes.io/not-ready
+          operator: Exists
+          tolerationSeconds: 300
+        - effect: NoExecute
+          key: node.kubernetes.io/unreachable
+          operator: Exists
+          tolerationSeconds: 300
