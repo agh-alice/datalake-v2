@@ -1,46 +1,102 @@
 # datalake-v2
 
-GitOps platform for the AGH–ALICE datalake v2 (design: alice-datalake-pepeline-redesign
-deliverables/2026-07-12-datalake-v2-design.md). Pattern: rendered manifests via ArgoCD
-Source Hydrator + umbrella chart + ESO (per the GAUGE upgrade of the Sano vht template).
+GitOps platform for the AGH–ALICE datalake v2 (design:
+`alice-datalake-pepeline-redesign/deliverables/2026-07-12-datalake-v2-design.md`).
+We are a three-namespace **tenant** on `alice-k8s-datalake`, a cluster the
+AGH-ALICE platform team owns and runs — not a cluster we install or manage
+ourselves. Their Argo CD (Source Hydrator) renders this repo's `main` into a
+rendered branch and syncs from there; we never touch their cluster or their
+ArgoCD directly except via `kubectl` reads. See
+`docs/runbooks/bootstrap-cyfronet.md` for the full deployment/rollback
+runbook (name kept for link stability; the content is the tenant runbook).
 
 ## Layout
-- `chart/` — umbrella Helm chart: OUR authored resources (DRY source; hydrated per env)
-- `apps/project.yaml` — the single scoped AppProject
-- `apps/infra/` — upstream operators as plain-Helm Applications (version-pinned)
-- `environments/<env>/apps/datalake.yaml` — per-env Source Hydrator Application
-- `environments/<env>/` — env bootstrap values + (cyfronet) SOPS secrets
-- `ingest/` — the `alice-ingest` pipeline image (dlt + pyiceberg; nightly/sitesonar/retention/maintenance/views/freshness subcommands)
-- `tools/` — standalone consumer-side scripts, not part of the ingest image (e.g. the DuckDB extraction recipe)
-- `docs/runbooks/` — operator guides (ingestion, backfill, cyfronet bootstrap, ML extraction, XID wraparound, adding a component)
-- Rendered branches `environments/kind`, `environments/cyfronet(-next)` are machine-owned.
+
+- `envs/prod/{storage,compute,orchestration}/` — the three tier Helm charts,
+  one per namespace (`datalake-storage`, `datalake-compute`,
+  `datalake-orchestration`). Each renders standalone (`helm template
+  envs/prod/<tier>`, remote chart dependencies only, no `file://`) and is
+  the platform's `sourceHydrator.drySource.path` for that tier. `Chart.lock`
+  is committed (vendored, exact pins); `charts/*.tgz` is gitignored, fetched
+  fresh by `helm dependency build` on every clone/CI run/hydration.
+- `environments/kind/` — the local/CI mirror: three Applications pointing at
+  the *same* `envs/prod/<tier>` charts with `values-kind.yaml` layered on,
+  plus `infra/` (the platform-owned operators kind has to stand up for
+  itself — CNPG, ESO, Argo Workflows, kube-prometheus-stack, Dex, MinIO —
+  and the kind-only ArgoCD instance that syncs all of it).
+- `ingest/` — the `alice-ingest` pipeline image (dlt + pyiceberg;
+  nightly/sitesonar/retention/maintenance/views/freshness subcommands).
+- `tools/` — standalone consumer-side scripts, not part of the ingest image
+  (the DuckDB extraction recipe).
+- `docs/runbooks/` — operator guides (ingestion, backfill, tenant
+  deployment, ML extraction, XID wraparound, adding a component).
+- `hack/` — `make lint`/`make kind-up`/`make kind-verify` and their
+  supporting scripts, including `check-seam.sh` (the cluster-scoped-kind
+  gate, reused locally, in CI, and conceptually by the platform's
+  `clusterResourceWhitelist: []` at sync time).
+- Rendered branches: `environments/kind` (this repo's own kind ArgoCD syncs
+  from it) and, once the platform's ApplicationSet switches to
+  `sourceHydrator`, `environments/prod`/`environments/prod-next`
+  (machine-rendered by *their* hub, not pushed by us — see the runbook).
 
 ## Environments
-| env | purpose | bootstrap |
+
+| env | purpose | how it's driven |
 |-----|---------|-----------|
-| kind | local/CI verification | `make kind-up && make kind-verify` |
-| cyfronet | production | `docs/runbooks/bootstrap-cyfronet.md` |
+| kind | local/CI verification, mirrors the tenant topology | `make kind-up && make kind-verify` |
+| prod (`alice-k8s-datalake`) | production, platform-managed | commit to `main` → platform's Argo CD hydrates → PR `environments/prod-next` → `environments/prod` → their ArgoCD syncs. `docs/runbooks/bootstrap-cyfronet.md` for the full flow, rollback, and current open dependencies. |
 
-## Components
+## Ownership — the seam
 
-Full platform surface as of `v0.3.0` (Plan 1: bootstrap/GitOps; Plan 2:
-ingestion/lakehouse; Plan 3: query layer). Pins live in each Application's
-own file — this table is a map, not the source of truth; a version listed
-here can drift if the linked file isn't updated in lockstep, though CI's
-`make lint` only validates the manifests render, not that this table stays
-current.
+The platform's AppProject bounds us with `clusterResourceWhitelist: []` and
+three namespace destinations — every object every tier chart renders must
+be namespaced. This table is the map of who runs what; `docs/runbooks/
+bootstrap-cyfronet.md` §1 has the full reasoning and `hack/check-seam.sh` is
+the enforceable version of the same rule (local + CI + the platform's own
+admission at sync time).
 
-| Component | Role | Pin | Defined in |
-|---|---|---|---|
-| ArgoCD (Source Hydrator) | GitOps controller: renders `chart/` + per-env values, pushes to the `environments/<env>` branches this cluster actually syncs from | chart 10.1.3 / image `v3.5.0-rc2` (RC — no 3.5 GA exists yet; re-pin before cyfronet, tracked in `docs/runbooks/bootstrap-cyfronet.md`) | `hack/kind-up.sh`, `environments/kind/argocd-values.yaml` |
-| CloudNativePG | Postgres operator; runs the `lakekeeper-db` and `landing-db` Clusters (digest-pinned `postgresql:16.6`) | chart 0.28.0 | `apps/infra/cloudnative-pg.yaml` |
-| External Secrets Operator | ExternalSecret/ClusterSecretStore CRDs for cyfronet credential sourcing; unused on kind, which harness-provisions Secrets directly (`hack/kind-up.sh`) | chart 2.7.0 | `apps/infra/external-secrets.yaml` |
-| kube-prometheus-stack | Prometheus + Alertmanager; loads the `datalake`/`datalake-pipeline` PrometheusRule groups (XID age, workflow failures, chronic-failure streaks, retention, Iceberg snapshot/maintenance/sitesonar staleness); Grafana OIDC against Dex; Alertmanager routes `slack-datalake` (kind: an in-cluster echo-receiver stand-in; cyfronet: real Slack webhook via ESO, gate G3) | chart 83.4.0 | `apps/infra/monitoring.yaml` |
-| MinIO | S3-compatible object store backing Lakekeeper's storage-profile | chart 5.4.0 — **kind-only** (Cyfronet S3 replaces it at Plan 4 cutover) | `environments/kind/apps/minio.yaml` |
-| Lakekeeper | Iceberg REST catalog: owns the `default` warehouse and (Plan 3) the `lake.contract` view schema | chart 0.11.0 / app 0.12.2 | `apps/infra/lakekeeper.yaml` |
-| Argo Workflows | Workflow/CronWorkflow engine; every `alice-ingest` subcommand runs as a Workflow under this | chart 1.0.19 / app v4.0.7 (`spec.schedules` list schema, not legacy `schedule`) | `apps/infra/argo-workflows.yaml` |
-| Trino | SQL query layer; catalogs `lake` (Iceberg REST, vended S3 creds) and `landing` (PostgreSQL federation, read-only `trino_ro` role) | chart 1.40.0 / app 476 — **kind-only pin** (476+ builds need x86-64-v3; cyfronet's real hardware should re-evaluate the newest chart) | `apps/infra/trino.yaml` |
-| Dex | Standalone OIDC bridge (design D-Dex): `mockCallback` connector on kind proves the issuer + a real relying party (Grafana) work; real GitHub-org (`agh-alice`) connector is a documented cyfronet placeholder (owner creates the OAuth App) — `docs/runbooks/bootstrap-cyfronet.md` | chart 0.24.1 / app v2.44.0 | `apps/infra/dex.yaml` |
-| `chart/` (this repo's umbrella chart) | Our authored resources: `lakekeeper-db`/`landing-db` Clusters, namespaces, `ingest-nightly`/`ingest-sitesonar`/`ingest-maintenance` CronWorkflows, the `hello` workflow-execution canary (kind-only, values-gated), RBAC, alert rules | hydrated per env by the Source Hydrator | `chart/templates/`, `chart/values*.yaml` |
-| `alice-ingest` (ingest image) | `run-nightly`, `run-sitesonar`, `run-retention`, `check-freshness`, `run-maintenance`, `run-trino-maintenance`, `apply-views` | digest-pinned; `chart/values.yaml`'s `images.ingest` | `ingest/`, `docs/runbooks/ingestion-pipeline.md` |
-| `tools/extract_training_data.py` | Consumer-side DuckDB extraction recipe: reads `lake.contract.*` (falls back to `lake.alice.*` with a warning — DuckDB's Iceberg extension cannot read REST-catalog views on the pinned version), writes Parquet + a provenance manifest. Replaces the old Dremio Flight script | standalone; not part of the ingest image | `tools/`, `docs/runbooks/ml-extraction.md` |
+**Platform-owned** (their cluster, applied for real, not in this repo):
+
+| Component | Role |
+|---|---|
+| Node pools, labels, placement | `pool={db,avx2,workers}`, `cpu=x86-64-v{2,3}`, `datalake.agh.edu.pl/role=database` on the db pool |
+| CloudNativePG 1.30 | Postgres operator our `Cluster` CRs (below) run under |
+| External Secrets Operator 2.8 | The `platform` `ClusterSecretStore` (Kubernetes provider, `remoteNamespace: eso-secret-source`) our `ExternalSecret` objects target |
+| Argo Workflows v4.0.8 | Scoped to `datalake-orchestration`; runs our CronWorkflows (below) |
+| kube-prometheus-stack | Their Prometheus adopts our `PrometheusRule`/`PodMonitor` objects via label `release: monitoring`, any namespace (`ruleNamespaceSelector: {}`) |
+| Dex | Standalone OIDC bridge — not deployed from this repo in prod at all |
+| cert-manager, Traefik, Cinder CSI | Cluster plumbing we consume (StorageClasses, ingress) but never define |
+| The tenant AppProject + ApplicationSet | Generates our three Applications from `envs/prod/<tier>` on branch `main` (drySource) |
+
+**We own** (this repo, three tier charts):
+
+| Component | Role | Defined in |
+|---|---|---|
+| `datalake-storage` chart | `landing-db`/`lakekeeper-db` CNPG `Cluster` CRs, hand-authored `PodMonitor`s (CNPG's own toggle can't carry `release: monitoring`), storage-tier alert rules, `ExternalSecret`s | `envs/prod/storage/` |
+| Lakekeeper | Iceberg REST catalog, chart **dependency** of `datalake-storage` (not a standalone Application — the AppProject shape doesn't allow one) | `envs/prod/storage/Chart.yaml` |
+| `datalake-compute` chart | Trino placement, resources, catalog config, `ExternalSecret`s | `envs/prod/compute/` |
+| Trino | SQL query layer, chart **dependency** of `datalake-compute`; catalogs `lake` (Iceberg REST, conditional on `values-lake.yaml` pending S3 creds) and `landing` (PostgreSQL federation, read-only `trino_ro` role) | `envs/prod/compute/Chart.yaml` |
+| `datalake-orchestration` chart | Ingest CronWorkflows (nightly/sitesonar/maintenance), workflow RBAC, orchestration-tier alert rules, kind-only `hello` canary and `echoReceiver`, `ExternalSecret`s | `envs/prod/orchestration/` |
+| `alice-ingest` (ingest image) | `run-nightly`, `run-sitesonar`, `run-retention`, `check-freshness`, `run-maintenance`, `run-trino-maintenance`, `apply-views` | `ingest/`, `docs/runbooks/ingestion-pipeline.md` |
+| `tools/extract_training_data.py` | Consumer-side DuckDB extraction recipe: reads `lake.contract.*` (falls back to `lake.alice.*` with a disambiguated reason — DuckDB's Iceberg extension can't read REST-catalog views), writes Parquet + a provenance manifest | `tools/`, `docs/runbooks/ml-extraction.md` |
+
+**kind-only** (never reaches prod — `environments/kind/infra/`, applied
+directly by `hack/kind-up.sh`, not hydrated): the operators the platform
+already runs for real (CNPG, ESO, Argo Workflows, kube-prometheus-stack),
+MinIO (Cyfronet S3 replaces it once G2 credentials land), and a
+mock-connector Dex (proves the OIDC issuer + a relying party, Grafana, work
+end-to-end — the real GitHub-org connector is entirely the platform's
+concern in prod, not something this repo configures).
+
+## Current status
+
+Three tier charts render standalone and pass `make lint` (helm dependency
+build + `hack/check-seam.sh` + helm lint + helm template/kubeconform,
+prod and kind values) from a clean clone. The kind harness mirrors the
+tenant topology (three Applications, same charts as prod, `values-kind.yaml`
+overrides) and passes `make kind-verify` end to end. **Not yet live in
+prod**: the platform's ApplicationSet still needs to switch to
+`spec.sourceHydrator`, gated on a deploy key handoff, plus several other
+open dependencies (S3 credentials, Slack webhook, ResourceQuotas, a missing
+database node taint). Full list, live-verified: `docs/runbooks/
+bootstrap-cyfronet.md` §5.
