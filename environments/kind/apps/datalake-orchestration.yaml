@@ -26,6 +26,19 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: datalake-orchestration
+  # See datalake-storage.yaml's identical block for the full rationale
+  # (ESO CRD schema defaults several optional ExternalSecret fields this
+  # chart's templates never set explicitly, which otherwise blocks Synced
+  # forever even though live already matches every field that IS set).
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jqPathExpressions:
+        - .spec.data[].remoteRef.conversionStrategy
+        - .spec.data[].remoteRef.decodingStrategy
+        - .spec.data[].remoteRef.metadataPolicy
+        - .spec.target.creationPolicy
+        - .spec.target.deletionPolicy
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]

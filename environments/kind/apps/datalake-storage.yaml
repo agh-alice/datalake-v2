@@ -68,6 +68,27 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: datalake-storage
+  # Live finding, Task 4 clean-room: ExternalSecret objects never reach
+  # Synced -- ESO's own CRD schema defaults several optional fields
+  # (remoteRef.conversionStrategy, .decodingStrategy, .metadataPolicy;
+  # target.creationPolicy, .deletionPolicy) that this chart's templates
+  # (deliberately minimal, no-secrets-in-git) never set explicitly.
+  # ArgoCD's SSA-based diff sees "desired lacks these keys, live has
+  # them" and reports OutOfSync forever, even though live already matches
+  # the rendered manifest byte-for-byte on every field that IS specified
+  # -- confirmed live via `kubectl get externalsecret ... -o
+  # jsonpath='{.spec}'` vs. the hydrated manifest.yaml, the only delta is
+  # these server-defaulted fields. Ignored here rather than hand-setting
+  # every default explicitly in the (out-of-scope) chart templates.
+  ignoreDifferences:
+    - group: external-secrets.io
+      kind: ExternalSecret
+      jqPathExpressions:
+        - .spec.data[].remoteRef.conversionStrategy
+        - .spec.data[].remoteRef.decodingStrategy
+        - .spec.data[].remoteRef.metadataPolicy
+        - .spec.target.creationPolicy
+        - .spec.target.deletionPolicy
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]
