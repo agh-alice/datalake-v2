@@ -127,7 +127,8 @@ trino:
     # off-heap/native headroom, the standard JVM-in-container rule of
     # thumb).
     resources:
-      requests: {cpu: 2, memory: 4Gi}
+      # Memory request must track jvm.maxHeapSize (8G); limit provides 2Gi off-heap headroom.
+      requests: {cpu: 2, memory: 8Gi}
       limits: {memory: 10Gi}
 
   # Injects the `landing` catalog's PostgreSQL credentials as env vars
