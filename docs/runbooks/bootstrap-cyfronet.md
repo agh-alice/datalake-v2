@@ -82,6 +82,17 @@ commit to main (dry source)
      (automated selfHeal, on the hub) sync from environments/prod HEAD
 ```
 
+The `values.yaml only` line above **assumes their ApplicationSet sets
+`sourceHydrator.drySource.helm.valueFiles: [values.yaml]` explicitly** —
+unverified, since we can't read their (private) ApplicationSet template. If
+they instead leave `valueFiles` empty/unset, Helm falls back to a bare
+render, which is a materially different shape: live-verified 2026-08-06,
+`helm template envs/prod/compute` with no `-f` at all renders Trino's
+default `tpch`/`tpcds` demo catalogs (harmless, namespaced, not a seam
+violation — but §4's troubleshooting bullet on Trino's catalog list assumes
+the explicit-`valueFiles` shape and would be wrong under the bare one).
+Confirm which shape their ApplicationSet actually uses at first sync.
+
 Three tier charts, three Applications, one dry source path each:
 `envs/prod/storage`, `envs/prod/compute`, `envs/prod/orchestration` on
 branch `main` — exactly what the platform's ApplicationSet expects
