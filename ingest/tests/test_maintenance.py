@@ -234,6 +234,14 @@ class TestRun:
         monkeypatch.setattr(
             maintenance_module, "load_iceberg_catalog", lambda env: catalog
         )
+        # Freeze "now" so the fixture's fixed-timestamp snapshots (OLD/RECENT,
+        # relative to the module-level NOW) stay on the correct side of the
+        # default 7-day cutoff regardless of when the suite runs.
+        monkeypatch.setattr(
+            maintenance_module,
+            "_now",
+            lambda: NOW,
+        )
 
         exit_code = run({})
 
