@@ -41,15 +41,16 @@ namespace.
    platform withholds ResourceQuotas until we hold this line consistently
    (`docs/runbooks/bootstrap-cyfronet.md` §5).
 3. **Never render a `kind: Secret`.** If the resource needs a credential,
-   follow the existing pattern: an `ExternalSecret` against the platform's
-   `platform` `ClusterSecretStore`, referenced by name/key only from the
-   chart (see the `lakekeeper-pg-encryption` `ExternalSecret`,
+   follow the existing pattern: an `ExternalSecret` against the `datalake`
+   `ClusterSecretStore` (tenant-writable; repointed 2026-08-07 from the
+   platform's original read-only `platform` store), referenced by name/key
+   only from the chart (see the `lakekeeper-pg-encryption` `ExternalSecret`,
    `envs/prod/storage/templates/external-secrets.yaml`, and its comment for
    the reasoning — ArgoCD has pruned chart-rendered secrets before, and a
    `helm lookup`-based generation approach is incompatible with GitOps
    render, argoproj/argo-cd#5202). On kind, `hack/kind-up.sh` provisions the
-   backing remote Secret directly; on the tenant cluster it's the platform's
-   or owner's to provision in `eso-secret-source`
+   backing remote Secret directly; on the tenant cluster it's ours to
+   provision in `eso-secret-source-datalake`
    (`docs/runbooks/bootstrap-cyfronet.md` §5) — same `ExternalSecret`
    object either way, only who populates the remote Secret differs.
 4. **If it needs `release: monitoring`:** any `PrometheusRule` or

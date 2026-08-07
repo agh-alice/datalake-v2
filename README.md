@@ -61,7 +61,7 @@ admission at sync time).
 |---|---|
 | Node pools, labels, placement | `pool={db,avx2,workers}`, `cpu=x86-64-v{2,3}`, `datalake.agh.edu.pl/role=database` on the db pool |
 | CloudNativePG 1.30 | Postgres operator our `Cluster` CRs (below) run under |
-| External Secrets Operator 2.8 | The `platform` `ClusterSecretStore` (Kubernetes provider, `remoteNamespace: eso-secret-source`) our `ExternalSecret` objects target |
+| External Secrets Operator 2.8 | The `datalake` `ClusterSecretStore` (Kubernetes provider, `remoteNamespace: eso-secret-source-datalake`, tenant-writable) our `ExternalSecret` objects target — repointed 2026-08-07 from the platform's original read-only `platform` store |
 | Argo Workflows v4.0.8 | Scoped to `datalake-orchestration`; runs our CronWorkflows (below) |
 | kube-prometheus-stack | Their Prometheus adopts our `PrometheusRule`/`PodMonitor` objects via label `release: monitoring`, any namespace (`ruleNamespaceSelector: {}`) |
 | Dex | Standalone OIDC bridge — not deployed from this repo in prod at all |

@@ -35,9 +35,13 @@ CronWorkflows had the platform not overridden it); kube-prometheus-stack;
 Dex; cert-manager; Traefik; Cinder CSI and its StorageClasses; the three
 tenant namespaces (`datalake-storage`, `datalake-compute`,
 `datalake-orchestration`, labels `tenant: datalake` +
-`datalake.agh.edu.pl/{tier,placement}`); the `platform` `ClusterSecretStore`
-(ESO Kubernetes provider, `remoteNamespace: eso-secret-source`); their
-Alertmanager (adopts our `PrometheusRule`s via `release: monitoring`,
+`datalake.agh.edu.pl/{tier,placement}`); two `ClusterSecretStore`s (ESO
+Kubernetes provider) — `platform` (`remoteNamespace: eso-secret-source`,
+read-only to us) and, since 2026-08-07, `datalake`
+(`remoteNamespace: eso-secret-source-datalake`, the one namespace under
+this scheme we can write, verified live 2026-08-07) — our `ExternalSecret`
+objects target `datalake`; their Alertmanager (adopts our `PrometheusRule`s
+via `release: monitoring`,
 `ruleNamespaceSelector: {}` — label-only, any namespace); the AppProject and
 the `platform/datalake/applicationset.yaml` that generates our three
 Applications.

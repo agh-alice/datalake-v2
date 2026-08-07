@@ -91,8 +91,11 @@ for ns in datalake-storage datalake-compute datalake-orchestration; do
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f -
 done
 
-# `platform` ClusterSecretStore (Plan 5 Task 4 -- brief: "same name as
-# production deliberately"). Two live findings from the Task 4 clean-room,
+# `datalake` ClusterSecretStore (Plan 5 Task 4 -- brief: "same name as
+# production deliberately"; renamed from `platform` 2026-08-07 when prod
+# repointed to its own tenant-writable store -- see
+# environments/kind/infra/cluster-secret-store.yaml). Two live findings
+# from the Task 4 clean-room,
 # both fixed by waiting on the external-secrets Application's own ArgoCD
 # health rather than a narrower proxy signal:
 #   1. `kubectl get crd` succeeding is NOT enough: a CRD object can exist
@@ -131,12 +134,12 @@ until kubectl apply -f environments/kind/infra/cluster-secret-store.yaml; do
   sleep 10
 done
 i=0
-while [ "$(kubectl get clustersecretstore platform -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" != "True" ]; do
+while [ "$(kubectl get clustersecretstore datalake -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" != "True" ]; do
   i=$((i + 1))
-  [ "$i" -gt 60 ] && { echo "FAIL: ClusterSecretStore platform not Ready after 5m"; exit 1; }
+  [ "$i" -gt 60 ] && { echo "FAIL: ClusterSecretStore datalake not Ready after 5m"; exit 1; }
   sleep 5
 done
-echo "ClusterSecretStore platform: Ready"
+echo "ClusterSecretStore datalake: Ready"
 
 # Lakekeeper's Postgres secret-store encryption key: harness-generated
 # throwaway, random per kind cluster (never in Git; the prod tenant

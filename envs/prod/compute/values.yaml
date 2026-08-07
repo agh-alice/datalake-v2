@@ -19,10 +19,10 @@
 # PriorityClass by name; this chart never creates one. Namespace-only
 # confirmed; Step 1 does not block this chart.
 # Plan 5 Task 3 Step 4: gates templates/external-secrets.yaml. Superseding
-# note (Task 4): kind runs its own `platform` ClusterSecretStore (see
-# envs/prod/storage/values.yaml's identical note) -- values-kind.yaml does
-# NOT override this to false; it stays true on kind too, same store name
-# as production.
+# note (Task 4, re-superseded 2026-08-07): kind runs its own `datalake`
+# ClusterSecretStore (see envs/prod/storage/values.yaml's identical note)
+# -- values-kind.yaml does NOT override this to false; it stays true on
+# kind too, same store name as production.
 externalSecrets:
   enabled: true
 

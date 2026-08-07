@@ -25,13 +25,19 @@ placement:
       effect: NoSchedule
 
 # Plan 5 Task 3 Step 4 (secrets): gates the ExternalSecret templates in this
-# chart (templates/external-secrets.yaml). Superseding note (Task 4): kind
-# now runs its OWN `platform` ClusterSecretStore (ESO Kubernetes provider,
-# hack/kind-up.sh provisions the backing Secrets in namespace
-# eso-secret-source) -- deliberately the same store NAME as production, so
-# the ExternalSecret objects these charts render are byte-identical across
-# environments (the whole point of the fidelity exercise). values-kind.yaml
-# does NOT override this to false; it stays true on kind too.
+# chart (templates/external-secrets.yaml). Superseding note (Task 4,
+# re-superseded 2026-08-07): kind runs its OWN `datalake` ClusterSecretStore
+# (ESO Kubernetes provider, hack/kind-up.sh provisions the backing Secrets
+# in namespace eso-secret-source) -- deliberately the same store NAME as
+# production, so the ExternalSecret objects these charts render are
+# byte-identical across environments (the whole point of the fidelity
+# exercise). Renamed from `platform` to `datalake` on 2026-08-07 when prod
+# repointed to a tenant-writable ClusterSecretStore (the platform's
+# `platform` store is read-only to us); kind's mirror renamed to match,
+# same reasoning, kind's own eso-secret-source namespace name left as-is
+# (it was never required to match prod's remoteNamespace, only the store
+# NAME needs to). values-kind.yaml does NOT override this to false; it
+# stays true on kind too.
 externalSecrets:
   enabled: true
 
@@ -105,8 +111,9 @@ landingDb:
 # datalake-storage/lakekeeper-pg-encryption -- created by hack/kind-up.sh on
 # kind (random per cluster) and, on the prod tenant cluster, by the
 # ExternalSecret in templates/external-secrets.yaml (Plan 5 Task 3) against
-# the platform's ClusterSecretStore `platform`. Never templated in this
-# chart (no-secrets-in-rendered-branches constraint; upstream
+# the tenant-writable ClusterSecretStore `datalake` (repointed 2026-08-07
+# from the platform-owned, read-only `platform` store). Never templated in
+# this chart (no-secrets-in-rendered-branches constraint; upstream
 # auto-generation relies on helm lookup which ArgoCD render does not
 # support, argoproj/argo-cd#5202).
 #

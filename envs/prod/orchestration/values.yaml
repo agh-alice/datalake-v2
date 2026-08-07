@@ -24,10 +24,13 @@ helloCron:
     limits: {memory: 32Mi}
 
 # Plan 5 Task 3 Step 4: gates templates/external-secrets.yaml. Superseding
-# note (Task 4): kind runs its own `platform` ClusterSecretStore (see
-# envs/prod/storage/values.yaml's identical note) -- values-kind.yaml does
-# NOT override this to false; it stays true on kind too, same store name
-# as production. Independent-review finding (2026-08-07, resolved): Task 4
+# note (Task 4, re-superseded 2026-08-07): kind runs its own `datalake`
+# ClusterSecretStore (see envs/prod/storage/values.yaml's identical note)
+# -- values-kind.yaml does NOT override this to false; it stays true on
+# kind too, same store name as production (renamed from `platform` to
+# `datalake` on both sides together, so the ExternalSecrets stay
+# byte-identical across environments). Independent-review finding
+# (2026-08-07, resolved): Task 4
 # left a gap here -- SITESONAR_LIMIT (see ingest.sitesonarLimit above) had
 # no ExternalSecret data: entry at all, so kind inherited prod's daily
 # SiteSonar schedule with no way to bound the first-ever unbounded fetch
@@ -179,15 +182,16 @@ ingest:
 # (envs/prod/storage/values.yaml's comment). On kind, hack/kind-up.sh
 # creates `ingest-env` directly from harness-generated/in-cluster values.
 # On the prod tenant cluster it is now sourced via a real ExternalSecret
-# (Plan 5 Task 3, templates/external-secrets.yaml) against the platform's
-# ClusterSecretStore `platform` (verified live 2026-08-06 -- superseding
-# the "<platform ClusterSecretStore name, TO VERIFY>" placeholder this
-# comment used to carry). remoteRef uses `property` (not just `key`,
-# which the illustrative sketch this replaces omitted) -- ESO's Kubernetes
-# provider JSON-encodes the WHOLE remote Secret when `property` is absent
-# (verified against external-secrets.io/latest/provider/kubernetes); every
-# item below points at the single remote Secret `ingest-env` in
-# eso-secret-source, selecting one field each via `property`.
+# (Plan 5 Task 3, templates/external-secrets.yaml) against the tenant-
+# writable ClusterSecretStore `datalake` (repointed 2026-08-07 from the
+# platform-owned, read-only `platform` store -- verified live: `datalake`
+# reports Valid, remoteNamespace eso-secret-source-datalake, which this
+# repo can write). remoteRef uses `property` (not just `key`, which the
+# illustrative sketch this replaces omitted) -- ESO's Kubernetes provider
+# JSON-encodes the WHOLE remote Secret when `property` is absent (verified
+# against external-secrets.io/latest/provider/kubernetes); every item below
+# points at the single remote Secret `ingest-env` in eso-secret-source-datalake,
+# selecting one field each via `property`.
 #
 # Env-var contract (docs/runbooks/ingestion-pipeline.md owns the
 # authoritative table) with in-cluster DNS names updated for the

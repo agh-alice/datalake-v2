@@ -33,17 +33,18 @@ for app in "${EXPECTED_APPS[@]}"; do
   done
 done
 
-# Hard gate (Plan 5 Task 4): the `platform` ClusterSecretStore
-# (environments/kind/infra/cluster-secret-store.yaml) must be Ready --
-# every one of the three tier Applications' ExternalSecret objects depends
-# on it. hack/kind-up.sh already polls for this once at cluster-up time;
-# re-asserted here as part of the acceptance run itself, not just the
-# bootstrap script.
-CSS_READY=$(kubectl get clustersecretstore platform -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+# Hard gate (Plan 5 Task 4; renamed `platform` -> `datalake` 2026-08-07,
+# see environments/kind/infra/cluster-secret-store.yaml): the `datalake`
+# ClusterSecretStore (environments/kind/infra/cluster-secret-store.yaml)
+# must be Ready -- every one of the three tier Applications' ExternalSecret
+# objects depends on it. hack/kind-up.sh already polls for this once at
+# cluster-up time; re-asserted here as part of the acceptance run itself,
+# not just the bootstrap script.
+CSS_READY=$(kubectl get clustersecretstore datalake -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
 if [ "$CSS_READY" = "True" ]; then
-  echo "OK: ClusterSecretStore platform Ready"
+  echo "OK: ClusterSecretStore datalake Ready"
 else
-  echo "FAIL: ClusterSecretStore platform not Ready (status=$CSS_READY)"; exit 1
+  echo "FAIL: ClusterSecretStore datalake not Ready (status=$CSS_READY)"; exit 1
 fi
 
 # Hard gate (final review R1): "Synced" can be true against a STALE rendered
@@ -171,7 +172,8 @@ fi
 # secrets must exist -- ArgoCD once pruned one after it left the chart;
 # verify they survive reconciliation. Plan 5 Task 3/4: all three are now
 # ExternalSecret-sourced (envs/prod/<tier>/templates/external-secrets.yaml)
-# against the `platform` ClusterSecretStore, not hack/kind-up.sh-created
+# against the `datalake` ClusterSecretStore (renamed from `platform`
+# 2026-08-07), not hack/kind-up.sh-created
 # plain Secrets -- checking for the resulting TARGET Secret in each tier's
 # namespace proves the whole ESO round-trip (remote Secret in
 # eso-secret-source -> ClusterSecretStore -> ExternalSecret -> target
