@@ -345,6 +345,7 @@ spec:
     kind: ClusterSecretStore
     name: platform
   target:
+    deletionPolicy: Delete
     name: lakekeeper-pg-encryption
 ---
 apiVersion: monitoring.coreos.com/v1

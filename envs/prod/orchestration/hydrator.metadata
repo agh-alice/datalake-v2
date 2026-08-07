@@ -1,7 +1,7 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "182500faa7f03d064f107950a1e8c99f8fa3f943",
+  "drySha": "3af6d457ea5341163b57d4dd3ed12ce4556b16e0",
   "commands": [
-    "helm template . --name-template datalake-orchestration --values ./envs/prod/orchestration/values.yaml --values ./envs/prod/orchestration/values-kind.yaml --include-crds"
+    "helm template . --name-template datalake-orchestration --namespace datalake-orchestration --values ./envs/prod/orchestration/values.yaml --values ./envs/prod/orchestration/values-kind.yaml --include-crds"
   ]
 }

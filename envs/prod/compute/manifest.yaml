@@ -265,6 +265,7 @@ spec:
     kind: ClusterSecretStore
     name: platform
   target:
+    deletionPolicy: Delete
     name: landing-ro
 ---
 apiVersion: v1

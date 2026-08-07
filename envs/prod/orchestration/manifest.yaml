@@ -340,11 +340,16 @@ spec:
         key: ingest-env
         property: TRINO_URI
       secretKey: TRINO_URI
+    - remoteRef:
+        key: ingest-env
+        property: SITESONAR_LIMIT
+      secretKey: SITESONAR_LIMIT
   refreshInterval: 1h
   secretStoreRef:
     kind: ClusterSecretStore
     name: platform
   target:
+    deletionPolicy: Delete
     name: ingest-env
 ---
 apiVersion: monitoring.coreos.com/v1
