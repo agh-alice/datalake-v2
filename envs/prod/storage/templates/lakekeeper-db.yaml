@@ -9,6 +9,15 @@ kind: Cluster
 metadata:
   name: lakekeeper-db
   namespace: datalake-storage
+  # Rollback-hazard fix -- see templates/landing-db.yaml's identical
+  # annotation for the full rationale (docs/runbooks/bootstrap-cyfronet.md
+  # §3): a revert must not be able to prune this Cluster (and its PVC via
+  # ownerReference) as a side effect of removing unrelated workload
+  # changes, and Delete=false covers the separate app-deletion cascade
+  # path we can't verify away without hub access. Deleting this database
+  # now requires a deliberate, separate step.
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
 spec:
   instances: {{ .Values.lakekeeperDb.instances }}
   # Digest-pinned per no-mutable-tags convention (Plan-1 final-review N2).

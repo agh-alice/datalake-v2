@@ -159,20 +159,63 @@ and no hub access to force or pause a sync.
    then revert the corresponding merge commit **on `environments/prod`**
    (a second PR, same review gate as any other change reaching prod).
    Skipping the `main` revert means the bad state keeps coming back.
-2. **Check what the revert deletes before merging it — prune is armed.**
+2. **Prune is armed for everything except the two databases.**
    `syncPolicy.automated: {prune: true, selfHeal: true}` with
    `ServerSideApply=true`: anything that disappears from the rendered
    manifest is deleted from the live cluster automatically, no confirmation
-   step. A revert that removes a resource — most dangerously, the storage
-   tier's `lakekeeperDb`/`landingDb` CNPG `Cluster` blocks — deletes that
-   `Cluster` and its PVCs live. **Never blind-revert the storage tier.**
-   Diff what the rollback PR actually removes; if it touches a `Cluster`
-   object, treat it as a data-loss event and coordinate before merging, not
-   after.
-3. **Don't hand-fix live objects with kubectl.** selfHeal reconciles on a
+   step. That is true for every object the three tiers render: Lakekeeper's
+   Deployment, ExternalSecrets, CronWorkflows, PrometheusRules, RBAC — with
+   one deliberate exception. The storage tier's two CNPG `Cluster` objects
+   (`lakekeeper-db` and `mon-data`, `envs/prod/storage/templates/lakekeeper-db.yaml`
+   and `landing-db.yaml`) carry
+   `argocd.argoproj.io/sync-options: Prune=false,Delete=false`. A revert
+   that drops one of those `Cluster` blocks from the rendered manifest does
+   **not** delete it: per ArgoCD's own sync-options docs (pinned
+   `v3.5.0-rc2`), the app instead goes `OutOfSync` (extra resource present)
+   and leaves the live object alone. Without that annotation, a revert
+   would delete the `Cluster`, the operator would tear the instance down,
+   and the PVC would go with it via ownerReference, recoverable only as an
+   orphaned Cinder volume (`cinder-perf`'s `reclaimPolicy: Retain`,
+   confirmed live 2026-08-07) through a manual PV-rebinding exercise
+   mid-incident. That is the wrong failure mode for the one procedure meant
+   to make things safer, so it's fenced off. `Delete=false` is the second
+   half of that fence, for a path `Prune=false` doesn't cover: cascading
+   deletion when the *Application itself* is deleted (ArgoCD's
+   `resources-finalizer.argocd.argoproj.io` finalizer), not just when a
+   resource drops out of a synced manifest. We can't confirm whether the
+   hub's ApplicationSet sets that finalizer on our three Applications —
+   same "unverified from our side" gap as everything else in §5 — so both
+   options are set rather than assuming it doesn't apply.
+
+   **What a revert does and does not remove:** a revert of the storage tier
+   removes the workload shape around a database (its Deployment, its
+   ExternalSecrets, its PodMonitors) and leaves the `Cluster`, and its
+   data, running on whatever version was last synced. Nothing else in the
+   three tiers carries this fence, deliberately: blanket-protecting every
+   resource would turn normal GitOps pruning (removing what should
+   actually be gone — a retired CronWorkflow, a renamed Secret) into
+   permanent litter that never cleans up. Only the two objects whose
+   deletion is irreversible outside a manual recovery exercise get the
+   exception. Diff what the rollback PR actually removes regardless; if it
+   touches anything else, prune will still take it, immediately, no
+   confirmation.
+3. **To actually decommission a database, do it on purpose.** Removing a
+   `Cluster` for real now takes a deliberate second step: drop (or edit)
+   its `sync-options: Prune=false,Delete=false` annotation and the
+   `Cluster` block, in a commit of its own (not folded into an unrelated
+   revert), with the PR description saying plainly that it deletes the
+   `Cluster` and its PVC live. Review it as a data-loss change, on the same
+   footing as any other change that reaches prod (§2).
+4. **Don't hand-fix live objects with kubectl.** selfHeal reconciles on a
    short loop (minutes) and reverts any manual edit back to whatever the
    synced branch says — a kubectl edit doesn't fix anything, it just adds a
    race you'll lose.
+
+The kind harness mirrors this: `environments/kind/apps/datalake-storage.yaml`
+renders the identical `envs/prod/storage` templates (only `values-kind.yaml`
+differs), so the same `Prune=false` fence is live on kind's
+`lakekeeper-db`/`mon-data` Clusters too — a revert on kind behaves the same
+way it would in prod, which is the point of the mirror.
 
 ## 4. When a sync goes wrong
 

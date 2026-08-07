@@ -9,6 +9,30 @@ kind: Cluster
 metadata:
   name: mon-data
   namespace: datalake-storage
+  # Rollback-hazard fix (docs/runbooks/bootstrap-cyfronet.md §3): the
+  # platform's ApplicationSet arms `syncPolicy.automated: {prune: true,
+  # selfHeal: true}` and git is our only control surface -- "revert the
+  # hydrated branch" is the entire emergency lever. Without this
+  # annotation a revert that drops this Cluster from the rendered
+  # manifest deletes it live, the operator tears the instance down, and
+  # the PVC goes with it via ownerReference (survives only as an
+  # orphaned volume if the StorageClass retains -- `cinder-perf` does,
+  # `reclaimPolicy: Retain`, live-verified 2026-08-07 -- but recovery is
+  # then a manual PV-rebinding exercise mid-incident). Two distinct sync
+  # options, two distinct deletion paths (ArgoCD docs, pinned
+  # v3.5.0-rc2): Prune=false covers normal sync-time pruning (a revert
+  # removing this block from the rendered manifest); Delete=false covers
+  # the separate cascading-delete-on-Application-deletion path (their
+  # docs' own example is "retain PVCs even after your application is
+  # deleted") -- relevant here because we can't inspect the hub's
+  # ApplicationSet to know whether it sets the
+  # resources-finalizer.argocd.argoproj.io cascade finalizer (same
+  # "unverified from our side" class as this runbook's other hub-side
+  # gaps, §5). Both cost nothing when not triggered. Actually
+  # decommissioning this Cluster requires removing both and deleting the
+  # object by hand, deliberately, which is the point.
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
 spec:
   instances: {{ .Values.landingDb.instances }}
   # Digest-pinned per no-mutable-tags convention (Plan-1 final-review N2) --
