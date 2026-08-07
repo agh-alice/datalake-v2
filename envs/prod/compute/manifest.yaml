@@ -268,7 +268,7 @@ spec:
   refreshInterval: 1h
   secretStoreRef:
     kind: ClusterSecretStore
-    name: platform
+    name: datalake
   target:
     deletionPolicy: Delete
     name: landing-ro
