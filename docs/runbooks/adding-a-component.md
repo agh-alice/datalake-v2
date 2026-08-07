@@ -84,11 +84,19 @@ the dependency.
    chart at the version you intend to pin and render it standalone
    (`helm template <chart-repo>/<chart> --version <x> --include-crds`, or
    pull it into a scratch dir and run `hack/check-seam.sh` against it once
-   vendored). If it emits *any* cluster-scoped kind — a CRD, a ClusterRole,
-   a StorageClass, anything `hack/check-seam.sh`'s kind list flags — stop
-   and report it. That's a platform-side decision (does the platform
-   install this operator instead, does it get a whitelist exception), not
-   something to route around by hand-editing the rendered output. Lakekeeper
+   vendored). `hack/check-seam.sh`'s real gate (independent-review finding,
+   2026-08-07) is that EVERY rendered object must carry `metadata.namespace`
+   -- a cluster-scoped kind (CRD, ClusterRole, StorageClass, or anything
+   else, named or not) always fails this, no list to consult. If the chart
+   emits a *namespaced* object that simply omits `metadata.namespace` in
+   its own rendered manifest (some charts' helm-test hooks do this,
+   relying on apply-time namespace) that also fails here and needs adding
+   to the script's small, commented `ALLOWED_NAMESPACELESS` array -- not
+   automatically a stop-and-report case the way a genuinely cluster-scoped
+   kind is. If it's the latter -- stop and report it. That's a
+   platform-side decision (does the platform install this operator
+   instead, does it get a whitelist exception), not something to route
+   around by hand-editing the rendered output. Lakekeeper
    0.11.0 and Trino 1.42.2 were both verified namespace-only this way before
    being vendored (task-2-report.md has the full verification transcript).
 2. **Add it to the tier's `Chart.yaml` `dependencies:`, pinned, with a
