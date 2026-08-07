@@ -1,6 +1,6 @@
 {
   "repoURL": "https://github.com/agh-alice/datalake-v2.git",
-  "drySha": "2b04d37818c5eb01a5773d8840687ed4ad601df0",
+  "drySha": "d140271df4380ce8e0cea5284ed730e32733eb3f",
   "commands": [
     "helm template . --name-template datalake-storage --namespace datalake-storage --values ./envs/prod/storage/values.yaml --values ./envs/prod/storage/values-kind.yaml --include-crds"
   ]
