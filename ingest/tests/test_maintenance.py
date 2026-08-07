@@ -234,9 +234,16 @@ class TestRun:
         monkeypatch.setattr(
             maintenance_module, "load_iceberg_catalog", lambda env: catalog
         )
-        # Freeze "now" so the fixture's fixed-timestamp snapshots (OLD/RECENT,
-        # relative to the module-level NOW) stay on the correct side of the
-        # default 7-day cutoff regardless of when the suite runs.
+        # Freeze "now" so the fixed-timestamp snapshots (OLD/RECENT, computed
+        # at import time from the FIRST module-level NOW, 2026-07-12) stay on
+        # the correct side of the default 7-day cutoff regardless of when the
+        # suite runs. This lambda reads the module global at call time, so it
+        # actually resolves to the SECOND `NOW` rebinding further down this
+        # file (2026-07-13 03:00, used by the freshness-gate tests) -- that's
+        # fine here since OLD/RECENT sit many days from either NOW, but a
+        # future edit to that later constant moves this test's effective
+        # cutoff too. Matches the same-pattern freeze in the sibling
+        # test_honors_maintenance_older_than_days_env_override below.
         monkeypatch.setattr(
             maintenance_module,
             "_now",
