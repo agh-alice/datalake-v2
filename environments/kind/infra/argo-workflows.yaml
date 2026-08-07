@@ -27,7 +27,30 @@ spec:
       valuesObject:
         controller:
           metricsConfig: {enabled: true}
-          serviceMonitor: {enabled: true}
+          # additionalLabels: release: monitoring (independent-review
+          # finding, 2026-08-07, caught live post-fix, not one of the
+          # original four): kind's Prometheus selector tightening
+          # (environments/kind/infra/monitoring.yaml, finding 3) dropped
+          # this ServiceMonitor's scrape target the moment it synced --
+          # confirmed live: argo_workflows_total_count/
+          # argo_workflows_cronworkflows_triggered_total (both consumed by
+          # envs/prod/orchestration/templates/datalake-alerts.yaml's
+          # WorkflowFailed/WorkflowChronicFailure exprs) had real
+          # historical data up to the moment of the selector change, then
+          # went empty -- a loaded-but-input-starved rule, exactly the
+          # silent-monitoring-failure class finding 3 exists to kill, one
+          # hop further downstream than the Prometheus CR itself. This
+          # chart's bundled ServiceMonitor carries no release: monitoring
+          # label of its own (separate Helm release, "argo-workflows", not
+          # "monitoring") -- additionalLabels adds it back so kind's
+          # now-tightened selector still adopts it. Same question applies
+          # to prod: its platform-owned Prometheus almost certainly
+          # doesn't adopt this ServiceMonitor either (separate release, no
+          # release: monitoring label) -- these two alerts may already be
+          # unfireable in prod today, independent of this kind fix;
+          # flagged, not fixed here (this Application's chart source only
+          # reaches kind, not the platform's own argo-workflows install).
+          serviceMonitor: {enabled: true, additionalLabels: {release: monitoring}}
           # Task 4 fix (brief: "scoped to the orchestration namespace --
           # the chart default [\"default\"] would silently never run our
           # CronWorkflows"): confirmed live against the pulled chart's own
