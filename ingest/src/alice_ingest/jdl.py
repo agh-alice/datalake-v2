@@ -112,6 +112,22 @@ def parse_jdl(record: dict) -> dict:
     ORIGINAL landing value, never a half-decoded intermediate. Parsed
     values are canonicalized to strings (see `_canonicalize_values`) after
     the LPM-casing merge.
+
+    External review (v0.4.1 low-severity fix): `full_jdl` is popped from a
+    driver-supplied row with no type contract enforced upstream. `json.loads`
+    raises `TypeError` (not `ValueError`/`JSONDecodeError`) for anything
+    that isn't str/bytes/bytearray -- an already-decoded dict/list/int/bool,
+    say, if the driver ever hands one back. This `except` deliberately
+    catches `TypeError` too so that case takes the same preserve-and-flag
+    path as any other unparseable input, rather than raising and aborting
+    the whole extraction chunk. Caught HERE, at the outer boundary, and
+    deliberately NOT inside `_decode_jdl_object`'s own try/except: catching
+    it there would let a non-string `raw` fall through into the
+    escaped-JSON fallback (`f'"{raw}"'`), which stringifies the object's
+    `repr` and could accidentally parse into something plausible-looking
+    but wrong. Catching only here means a `TypeError` skips the fallback
+    entirely and lands straight in preserve-and-flag -- don't move this
+    catch inward.
     """
     raw = record.pop("full_jdl", None)
     if raw is None:
@@ -122,7 +138,7 @@ def parse_jdl(record: dict) -> dict:
         _merge_lpm_casing(parsed)
         record["jdl"] = _canonicalize_values(parsed)
         record["jdl_parse_ok"] = True
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError, TypeError):
         record["full_jdl_raw"] = raw
         record["jdl_parse_ok"] = False
     return record

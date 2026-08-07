@@ -240,6 +240,99 @@ class TestBuildViewDdl:
         assert '"_dlt_id"' in ddl
 
 
+class TestBuildViewDdlIdentifierValidation:
+    """External review (v0.4.1 low-severity fix): `build_view_ddl()`
+    interpolates `table`, `contract_name`, `dlt_name` (mapped AND
+    passthrough) and `null_type` straight into SQL, double-quoted but not
+    escaped. Today every one of those values comes from `contract_columns.py`
+    (repo-controlled), so this isn't an external-input vulnerability -- but
+    that mapping is REGENERATED from production data at cutover (has already
+    happened once), so a future regeneration could hand back an identifier
+    containing a quote and produce malformed or injected DDL.
+
+    Fixed by validating, not escaping: every identifier must match a strict
+    safe pattern (`^[A-Za-z_][A-Za-z0-9_]*$`, ASCII only, length capped) at
+    DDL-build time, or `build_view_ddl` raises `ValueError` naming the
+    offending value -- fails loudly at generation, not silently in the
+    database. Note the tradeoff this pattern accepts: `null_type` values
+    like `VARCHAR(255)` (parens) would be rejected too -- out of scope here
+    since every null_type in this codebase today is a bare keyword
+    (`VARCHAR`); widen the pattern deliberately if that ever changes.
+    """
+
+    def test_quote_bearing_contract_name_is_rejected(self):
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError, match='TTL".*DROP TABLE'):
+            build_view_ddl("mon_jdls_parsed", {'TTL"; DROP TABLE x --': "jdl__ttl"})
+
+    def test_quote_bearing_dlt_name_is_rejected(self):
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError, match="evil"):
+            build_view_ddl("mon_jdls_parsed", {"TTL": 'jdl__ttl" evil'})
+
+    def test_quote_bearing_passthrough_name_is_rejected(self):
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError, match="evil"):
+            build_view_ddl(
+                "mon_jdls_parsed",
+                {"TTL": "jdl__ttl"},
+                passthrough=('_dlt_id" evil',),
+            )
+
+    def test_quote_bearing_null_type_is_rejected(self):
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError, match="evil"):
+            build_view_ddl(
+                "mon_jdls_parsed",
+                {"Activity": None},
+                null_type='VARCHAR); evil --',
+            )
+
+    def test_quote_bearing_table_name_is_rejected(self):
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError, match="evil"):
+            build_view_ddl('mon_jdls_parsed"; evil --', {"job_id": "job_id"})
+
+    def test_non_string_contract_name_is_rejected_not_stringified(self):
+        # _check_ident's isinstance guard is otherwise decorative -- a
+        # non-str mapping key must be rejected, not silently f-string'd
+        # into something that happens to look safe.
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError):
+            build_view_ddl("mon_jdls_parsed", {42: "jdl__ttl"})
+
+    def test_rejection_happens_before_any_ddl_is_returned(self):
+        # Fail at generation, not partway through -- no half-built DDL string
+        # is ever handed back to a caller.
+        from alice_ingest.views import build_view_ddl
+
+        with pytest.raises(ValueError):
+            build_view_ddl("mon_jdls_parsed", {"TTL": "jdl__ttl", 'Bad"Name': "jdl__bad"})
+
+    @pytest.mark.parametrize("table_name", ["job_info", "trace", "mon_jdls_parsed"])
+    def test_every_real_table_spec_identifier_passes_validation(self, table_name):
+        # The validator must accept every identifier this repo's real,
+        # production-regenerated mapping actually contains -- a pattern
+        # that's too strict would surface as a hard failure in
+        # `apply-views` / kind-verify, not in this test suite.
+        from alice_ingest.views import TABLE_SPECS, build_view_ddl
+
+        spec = TABLE_SPECS[table_name]
+        ddl = build_view_ddl(
+            table_name,
+            spec.columns,
+            null_type=spec.null_type,
+            passthrough=spec.passthrough,
+        )
+        assert ddl  # built without raising
+
+
 # ---------------------------------------------------------------------------
 # views.py: minimal Trino REST statement-polling client, against canned
 # response sequences (brief, Step 3 -- no live Trino).

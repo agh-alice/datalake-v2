@@ -117,6 +117,7 @@ it only reports it.
 
 from __future__ import annotations
 
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -138,6 +139,33 @@ CATALOG = "lake"
 SOURCE_SCHEMA = "alice"
 CONTRACT_SCHEMA = "contract"
 DEFAULT_NULL_TYPE = "VARCHAR"
+
+# External review (v0.4.1 low-severity fix): every identifier build_view_ddl
+# interpolates into DDL text (table name, contract names, dlt names -- mapped
+# and passthrough, null_type) is double-quoted but not escaped. Today they
+# all come from contract_columns.py (repo-controlled), so this isn't an
+# external-input vulnerability -- but that mapping is REGENERATED from
+# production data at cutover (has already happened once), and a future
+# regeneration could hand back a name containing a quote, producing
+# malformed or injected DDL. Validated, not escaped: fails loudly at
+# DDL-build time (naming the offending value) rather than silently in the
+# database. ASCII letters/digits/underscore only, must not start with a
+# digit -- matches every identifier this repo's real, production-derived
+# mapping contains (verified: contract_columns.py's 92 mapped/passthrough
+# names, longest 32 chars). A future non-bare null_type (e.g. `VARCHAR(255)`)
+# would need this pattern widened deliberately; that's a real tradeoff of
+# validating over escaping, not an oversight.
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_IDENTIFIER_LENGTH = 128
+
+
+def _check_ident(kind: str, name: str) -> str:
+    """Return `name` unchanged if it is a safe SQL identifier; raise
+    `ValueError` naming both the offending value and which role it was
+    playing (`kind`, e.g. "contract_name", "dlt_name", "table"), otherwise."""
+    if not isinstance(name, str) or not _SAFE_IDENTIFIER.match(name) or len(name) > _MAX_IDENTIFIER_LENGTH:
+        raise ValueError(f"unsafe SQL identifier for {kind}: {name!r}")
+    return name
 
 
 # --------------------------------------------------------------------------
@@ -196,7 +224,12 @@ def build_view_ddl(
     """`CREATE OR REPLACE VIEW lake.contract.<table>` selecting from
     `lake.alice.<table>`, per this module's docstring. Raises `ValueError`
     if there is nothing to select at all (an empty mapping AND no
-    passthrough columns -- a real view can't have zero columns).
+    passthrough columns -- a real view can't have zero columns), or if any
+    identifier (`table`, a `columns` key/value, a `passthrough` entry, or
+    `null_type`) fails `_check_ident`'s safe-identifier check (see that
+    function's module-level comment) -- validated up front, in its own
+    pass, before any DDL text is built, so a rejection never hands back a
+    half-built statement.
 
     Comma placement is load-bearing here, not cosmetic: a trailing SQL `--`
     comment runs to end-of-line, so a comma placed AFTER the comment (e.g.
@@ -208,6 +241,15 @@ def build_view_ddl(
     therefore built comma-first, comment-last, and lines are joined with a
     plain newline (no comma injected by the join itself).
     """
+    _check_ident("table", table)
+    _check_ident("null_type", null_type)
+    for contract_name, dlt_name in columns.items():
+        _check_ident("contract_name", contract_name)
+        if dlt_name is not None:
+            _check_ident("dlt_name", dlt_name)
+    for dlt_name in passthrough:
+        _check_ident("passthrough dlt_name", dlt_name)
+
     exprs: list[str] = []
     for contract_name, dlt_name in columns.items():
         if dlt_name is None:

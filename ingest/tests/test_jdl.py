@@ -106,6 +106,83 @@ class TestParseJdlExplicitCases:
             parse_jdl({"job_id": 1, "full_jdl": full_jdl})  # must not raise
 
 
+class TestParseJdlNeverRaisesOnWrongInputType:
+    """External review (v0.4.1 low-severity fix): `full_jdl` is popped from a
+    driver-supplied row dict with no type contract enforced upstream. Before
+    this fix, `_decode_jdl_object`'s `json.loads(raw)` raised `TypeError` --
+    not `ValueError`/`JSONDecodeError` -- for anything that isn't str/bytes/
+    bytearray (a dict, list, int, bool, ...), and `parse_jdl`'s except tuple
+    only listed `(ValueError, json.JSONDecodeError)`, so that `TypeError`
+    propagated out of `parse_jdl` and aborted the whole extraction chunk --
+    violating the never-drop-a-row property this module's docstring commits
+    to. `bytes`/`bytearray` are NOT part of this bug: `json.loads` accepts
+    them natively (decodes via BOM-sniffing same as any text), so they were
+    never at risk of raising -- confirmed empirically pre-fix. They're
+    included below only to pin down that the fix doesn't change their
+    (already-correct) behavior.
+    """
+
+    @pytest.mark.parametrize(
+        "full_jdl",
+        [
+            b'{"TTL": "3600"}',  # valid JSON as bytes -- must still parse, not be flagged
+            b"not json at all \xff\xfe",  # garbled bytes -- already correctly flagged pre-fix
+            bytearray(b'{"TTL": "3600"}'),
+            {"TTL": "3600"},  # already-decoded dict -- THE bug: raised TypeError pre-fix
+            ["TTL", "3600"],  # already-decoded list -- same TypeError class
+            42,
+            True,
+        ],
+        ids=[
+            "valid-json-bytes",
+            "garbled-bytes",
+            "valid-json-bytearray",
+            "decoded-dict",
+            "decoded-list",
+            "int",
+            "bool",
+        ],
+    )
+    def test_never_raises_regardless_of_input_type(self, full_jdl):
+        record = {"job_id": 99, "full_jdl": full_jdl}
+
+        result = parse_jdl(record)  # must not raise
+
+        assert "full_jdl" not in result
+        assert isinstance(result["jdl_parse_ok"], bool)
+
+    def test_valid_json_bytes_still_parses_successfully_not_flagged(self):
+        # Confirms the fix doesn't over-broadly treat all non-str input as a
+        # parse failure -- bytes carrying genuinely valid JSON must still
+        # parse, exactly like the equivalent str would.
+        record = {"job_id": 100, "full_jdl": b'{"TTL": "3600", "LPMPassName": "pass1"}'}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is True
+        assert result["jdl"] == {"TTL": "3600", "LPMPassName": "pass1"}
+
+    def test_already_decoded_dict_is_preserved_raw_and_flagged_not_raised(self):
+        raw = {"TTL": "3600", "LPMPassName": "pass1"}
+        record = {"job_id": 101, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is False
+        assert result["full_jdl_raw"] == raw  # original object preserved, not stringified
+        assert "jdl" not in result
+
+    def test_already_decoded_list_is_preserved_raw_and_flagged_not_raised(self):
+        raw = ["TTL", "3600"]
+        record = {"job_id": 102, "full_jdl": raw}
+
+        result = parse_jdl(record)
+
+        assert result["jdl_parse_ok"] is False
+        assert result["full_jdl_raw"] == raw
+        assert "jdl" not in result
+
+
 class TestParseJdlFixtureDriven:
     """Real-shaped samples incl. LPMPassName/LPMPASSNAME casing variants
     (consumer contract: research/2026-07-12_ml-consumer-data-contract.md).
