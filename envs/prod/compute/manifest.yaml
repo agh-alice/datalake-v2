@@ -1,0 +1,302 @@
+apiVersion: v1
+data:
+  landing.properties: |
+    connector.name=postgresql
+    connection-url=jdbc:postgresql://mon-data-rw.datalake-storage.svc:5432/mon_data
+    connection-user=${ENV:LANDING_RO_USER}
+    connection-password=${ENV:LANDING_RO_PASSWORD}
+  tpcds.properties: |
+    connector.name=tpcds
+    tpcds.splits-per-node=4
+  tpch.properties: |
+    connector.name=tpch
+    tpch.splits-per-node=4
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: catalogs
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+  name: trino-catalog
+  namespace: datalake-compute
+---
+apiVersion: v1
+data:
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port=8080
+    query.max-memory=4GB
+    query.max-memory-per-node=1GB
+    discovery.uri=http://localhost:8080
+  jvm.config: |
+    -server
+    -agentpath:/usr/lib/trino/bin/libjvmkill.so
+    -Xmx8G
+    -XX:+UseG1GC
+    -XX:G1HeapRegionSize=32M
+    -XX:+ExplicitGCInvokesConcurrent
+    -XX:+HeapDumpOnOutOfMemoryError
+    -XX:+ExitOnOutOfMemoryError
+    -XX:-OmitStackTraceInFastThrow
+    -XX:ReservedCodeCacheSize=512M
+    -XX:PerMethodRecompilationCutoff=10000
+    -XX:PerBytecodeRecompilationCutoff=10000
+    -Djdk.attach.allowAttachSelf=true
+    -Djdk.nio.maxCachedBufferSize=2000000
+    # Allow loading dynamic agent used by JOL
+    -XX:+EnableDynamicAgentLoading
+  log.properties: |
+    io.trino=INFO
+  node.properties: |
+    node.environment=production
+    node.data-dir=/data/trino
+    plugin.dir=/usr/lib/trino/plugin
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+  name: trino-coordinator
+  namespace: datalake-compute
+---
+apiVersion: v1
+data: null
+kind: ConfigMap
+metadata:
+  labels:
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+  name: trino-schemas-volume-coordinator
+  namespace: datalake-compute
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+  name: trino
+  namespace: datalake-compute
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: http
+  selector:
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/name: trino
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+  name: trino-worker
+  namespace: datalake-compute
+spec:
+  clusterIP: None
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: http
+  selector:
+    app.kubernetes.io/component: worker
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/name: trino
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: coordinator
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+    trino.io/network-policy-protection: disabled
+  name: trino-coordinator
+  namespace: datalake-compute
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: coordinator
+      app.kubernetes.io/instance: datalake-compute
+      app.kubernetes.io/name: trino
+  template:
+    metadata:
+      annotations:
+        checksum/catalog-config: 927dfd73e85faf9b32c8e260524f38dc7f1769847387e1322b46fd0905384b4a
+        checksum/coordinator-config: 5040cf01c05fbad9b928d813099c3f978e097c107d9f42e90864298f2f88e50f
+      labels:
+        app.kubernetes.io/component: coordinator
+        app.kubernetes.io/instance: datalake-compute
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: trino
+        app.kubernetes.io/version: "480"
+        helm.sh/chart: trino-1.42.2
+        trino.io/network-policy-protection: disabled
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: datalake.agh.edu.pl/role
+                    operator: NotIn
+                    values:
+                      - database
+      containers:
+        - env: []
+          envFrom:
+            - secretRef:
+                name: landing-ro
+          image: trinodb/trino@sha256:1565e8cac299a32dd9177a4da2d748da4ceb9f1560a9c409d1d18fd72ea5253e
+          imagePullPolicy: IfNotPresent
+          lifecycle: {}
+          livenessProbe:
+            failureThreshold: 6
+            httpGet:
+              path: /v1/info
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          name: trino-coordinator
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          readinessProbe:
+            exec:
+              command:
+                - /usr/lib/trino/bin/health-check
+            failureThreshold: 6
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 5
+          resources:
+            limits:
+              memory: 10Gi
+            requests:
+              cpu: 2
+              memory: 8Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          startupProbe:
+            exec:
+              command:
+                - /usr/lib/trino/bin/health-check
+            failureThreshold: 60
+            initialDelaySeconds: 10
+            periodSeconds: 2
+            successThreshold: 1
+            timeoutSeconds: 2
+          volumeMounts:
+            - mountPath: /etc/trino
+              name: config-volume
+            - mountPath: /etc/trino/catalog
+              name: catalog-volume
+            - mountPath: /etc/trino/schemas
+              name: schemas-volume
+      nodeSelector:
+        cpu: x86-64-v3
+      securityContext:
+        runAsGroup: 1000
+        runAsUser: 1000
+      serviceAccountName: default
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - configMap:
+            name: trino-coordinator
+          name: config-volume
+        - configMap:
+            name: trino-catalog
+          name: catalog-volume
+        - configMap:
+            name: trino-schemas-volume-coordinator
+          name: schemas-volume
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: landing-ro
+  namespace: datalake-compute
+spec:
+  data:
+    - remoteRef:
+        key: landing-ro
+        property: username
+      secretKey: LANDING_RO_USER
+    - remoteRef:
+        key: landing-ro
+        property: password
+      secretKey: LANDING_RO_PASSWORD
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: platform
+  target:
+    deletionPolicy: Delete
+    name: landing-ro
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    helm.sh/hook: test
+  labels:
+    app.kubernetes.io/component: test
+    app.kubernetes.io/instance: datalake-compute
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: trino
+    app.kubernetes.io/version: "480"
+    helm.sh/chart: trino-1.42.2
+    test: connection
+  name: trino-test-connection
+spec:
+  containers:
+    - args:
+        - trino://trino:8080
+        - --user=admin
+        - --debug
+        - --execute=SELECT COUNT(*) FROM tpch.tiny.nation
+        - --no-progress
+      command:
+        - trino
+      image: trinodb/trino@sha256:1565e8cac299a32dd9177a4da2d748da4ceb9f1560a9c409d1d18fd72ea5253e
+      name: cli
+  restartPolicy: Never

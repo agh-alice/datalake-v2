@@ -1,0 +1,7 @@
+{
+  "repoURL": "git@github.com:agh-alice/datalake-v2.git",
+  "drySha": "2b04d37818c5eb01a5773d8840687ed4ad601df0",
+  "commands": [
+    "helm template . --name-template datalake-storage --namespace datalake-storage --include-crds"
+  ]
+}

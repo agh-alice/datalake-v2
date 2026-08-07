@@ -1,0 +1,586 @@
+apiVersion: v1
+automountServiceAccountToken: true
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper
+  namespace: datalake-storage
+---
+apiVersion: v1
+data:
+  LAKEKEEPER__AUTHZ_BACKEND: YWxsb3dhbGw=
+  LAKEKEEPER__PG_DATABASE: bGFrZWtlZXBlcg==
+  LAKEKEEPER__PG_HOST_R: bGFrZWtlZXBlci1kYi1ydy5kYXRhbGFrZS1zdG9yYWdlLnN2Yw==
+  LAKEKEEPER__PG_HOST_W: bGFrZWtlZXBlci1kYi1ydy5kYXRhbGFrZS1zdG9yYWdlLnN2Yw==
+  LAKEKEEPER__PG_PORT: NTQzMg==
+  LAKEKEEPER__SECRET_BACKEND: UG9zdGdyZXM=
+kind: Secret
+metadata:
+  labels:
+    app.kubernetes.io/component: config
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper-config-envs
+  namespace: datalake-storage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper
+  namespace: datalake-storage
+rules:
+  - apiGroups:
+      - batch
+    resources:
+      - jobs
+    verbs:
+      - get
+      - list
+      - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/component: rbac
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper-rolebinding
+  namespace: datalake-storage
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: lakekeeper
+subjects:
+  - kind: ServiceAccount
+    name: lakekeeper
+    namespace: datalake-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/component: catalog
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper
+  namespace: datalake-storage
+spec:
+  ports:
+    - name: http
+      port: 8181
+      protocol: TCP
+      targetPort: http
+  selector:
+    app.kubernetes.io/component: catalog
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/name: lakekeeper
+  sessionAffinity: None
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/component: catalog
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper
+  namespace: datalake-storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: catalog
+      app.kubernetes.io/instance: datalake-storage
+      app.kubernetes.io/name: lakekeeper
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      annotations:
+        checksum/secret-config-envs: 949a2111b3a0f1b4e48f54daacb91e90b634a7d15b79e815dbc1dd4fdb5e0009
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+      labels:
+        app.kubernetes.io/component: catalog
+        app.kubernetes.io/instance: datalake-storage
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: lakekeeper
+        app.kubernetes.io/part-of: lakekeeper
+        app.kubernetes.io/version: 0.12.2
+        helm.sh/chart: lakekeeper-0.11.0
+    spec:
+      containers:
+        - args:
+            - serve
+          env:
+            - name: LAKEKEEPER__PG_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: encryptionKey
+                  name: lakekeeper-pg-encryption
+            - name: LAKEKEEPER__PLACEHOLDER
+              value: placeholder
+          envFrom:
+            - secretRef:
+                name: lakekeeper-config-envs
+          image: quay.io/lakekeeper/catalog:v0.12.2
+          imagePullPolicy: IfNotPresent
+          livenessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /health
+              port: 8181
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 5
+          name: lakekeeper
+          ports:
+            - containerPort: 8181
+              name: http
+              protocol: TCP
+            - containerPort: 9000
+              name: metrics
+              protocol: TCP
+          readinessProbe:
+            failureThreshold: 5
+            httpGet:
+              path: /health
+              port: 8181
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            timeoutSeconds: 5
+          resources:
+            limits:
+              memory: 512Mi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+          securityContext:
+            runAsGroup: 65534
+            runAsUser: 65532
+      initContainers:
+        - args:
+            - wait-for-db
+            - -dm
+            - -r
+            - "100"
+            - -b
+            - "2"
+          env:
+            - name: LAKEKEEPER__PG_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: encryptionKey
+                  name: lakekeeper-pg-encryption
+            - name: LAKEKEEPER__PLACEHOLDER
+              value: placeholder
+          envFrom:
+            - secretRef:
+                name: lakekeeper-config-envs
+          image: quay.io/lakekeeper/catalog:v0.12.2
+          imagePullPolicy: IfNotPresent
+          name: check-db
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 25m
+              memory: 32Mi
+          securityContext:
+            runAsGroup: 65534
+            runAsUser: 65532
+      nodeSelector:
+        pool: db
+      restartPolicy: Always
+      serviceAccountName: lakekeeper
+      tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: database
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+  name: lakekeeper-db
+  namespace: datalake-storage
+spec:
+  affinity:
+    nodeSelector:
+      pool: db
+    tolerations:
+      - effect: NoSchedule
+        key: dedicated
+        operator: Equal
+        value: database
+  bootstrap:
+    initdb:
+      database: lakekeeper
+      owner: lakekeeper
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6@sha256:53be6d727c7b3cf0df2b147f7ce7cdd31d37fd285314294871a4ccc3837b6872
+  instances: 2
+  resources:
+    limits:
+      memory: 1Gi
+    requests:
+      cpu: 250m
+      memory: 512Mi
+  storage:
+    size: 5Gi
+    storageClass: cinder-perf
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+  name: mon-data
+  namespace: datalake-storage
+spec:
+  affinity:
+    nodeSelector:
+      pool: db
+    tolerations:
+      - effect: NoSchedule
+        key: dedicated
+        operator: Equal
+        value: database
+  bootstrap:
+    initdb:
+      database: mon_data
+      owner: mon_user
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.6@sha256:53be6d727c7b3cf0df2b147f7ce7cdd31d37fd285314294871a4ccc3837b6872
+  instances: 3
+  postgresql:
+    parameters:
+      max_connections: "60"
+  resources:
+    limits:
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  storage:
+    size: 40Gi
+    storageClass: cinder-perf
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: lakekeeper-pg-encryption
+  namespace: datalake-storage
+spec:
+  data:
+    - remoteRef:
+        key: lakekeeper-pg-encryption
+        property: encryptionKey
+      secretKey: encryptionKey
+  refreshInterval: 1h
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: platform
+  target:
+    deletionPolicy: Delete
+    name: lakekeeper-pg-encryption
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    release: monitoring
+  name: mon-data
+  namespace: datalake-storage
+spec:
+  podMetricsEndpoints:
+    - port: metrics
+  selector:
+    matchLabels:
+      cnpg.io/cluster: mon-data
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  labels:
+    release: monitoring
+  name: lakekeeper-db
+  namespace: datalake-storage
+spec:
+  podMetricsEndpoints:
+    - port: metrics
+  selector:
+    matchLabels:
+      cnpg.io/cluster: lakekeeper-db
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    release: monitoring
+  name: datalake-alerts
+  namespace: datalake-storage
+spec:
+  groups:
+    - name: datalake
+      rules:
+        - alert: LandingDBXidAgeHigh
+          annotations:
+            description: cnpg_pg_database_xid_age has exceeded 1e9 for 30m. Unmitigated, this repeats E4 -- the landing DB hit transaction-ID wraparound protection and refused all writes for two months, unnoticed, because orphaned temp tables pinned the frozen-XID horizon.
+            incident: E4
+            runbook_url: docs/runbooks/xid-wraparound.md
+            summary: Landing DB transaction-ID age approaching wraparound
+          expr: max by (namespace, job) (cnpg_pg_database_xid_age{namespace="datalake-storage", job="datalake-storage/mon-data"}) > 1000000000
+          for: 30m
+          labels:
+            cluster: mon-data
+            severity: critical
+        - alert: CNPGClusterUnhealthy
+          annotations:
+            description: cnpg_pg_replication_streaming_replicas (max across mon-data's pods, i.e. the primary's view) has been below 2 for 15m -- HA is degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy that CNPG replaces.
+            incident: E5
+            summary: CNPG cluster mon-data has fewer streaming replicas than expected
+          expr: max by (namespace, job) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/mon-data"}) < 2
+          for: 15m
+          labels:
+            cluster: mon-data
+            severity: critical
+        - alert: CNPGClusterUnhealthy
+          annotations:
+            description: cnpg_pg_replication_streaming_replicas (max across lakekeeper-db's pods, i.e. the primary's view) has been below 1 for 15m -- HA is degraded. E5 was the RAID0-over-4-volumes VM with zero redundancy that CNPG replaces.
+            incident: E5
+            summary: CNPG cluster lakekeeper-db has fewer streaming replicas than expected
+          expr: max by (namespace, job) (cnpg_pg_replication_streaming_replicas{namespace="datalake-storage", job="datalake-storage/lakekeeper-db"}) < 1
+          for: 15m
+          labels:
+            cluster: lakekeeper-db
+            severity: critical
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    helm.sh/hook: test
+  labels:
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    component: catalog
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper-test-bootstrap
+  namespace: datalake-storage
+spec:
+  containers:
+    - args:
+        - |
+          set -e
+          TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+          BOOTSTRAP_URL="http://lakekeeper:8181/management/v1/bootstrap"
+          if [ -n "$TOKEN" ]; then
+            echo "Found K8s Service Account token"
+          else
+            echo "No K8s Service Account token found"
+          fi
+          for i in {1..45}; do
+            RESPONSE=$(curl --location "$BOOTSTRAP_URL" \
+              --header 'Content-Type: application/json' \
+              --header "Authorization: Bearer $TOKEN" \
+              --data '{"accept-terms-of-use": true}' \
+              --write-out "HTTP_CODE:%{http_code}" --silent --output /dev/null)
+
+            if [[ "$RESPONSE" == *"HTTP_CODE:204"* ]]; then
+              echo "Bootstrapping successful"
+              exit 0
+            else
+              echo "Request failed with status code and response: $RESPONSE"
+            fi
+
+            sleep 2
+          done
+          echo "Failed to bootstrap within the given time"
+          exit 1
+      command:
+        - sh
+        - -c
+      image: curlimages/curl:latest
+      name: base
+  restartPolicy: Never
+  serviceAccountName: lakekeeper
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "0"
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation
+    helm.sh/hook-weight: "-100"
+  labels:
+    app.kubernetes.io/component: db-migration
+    app.kubernetes.io/instance: datalake-storage
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: lakekeeper
+    app.kubernetes.io/part-of: lakekeeper
+    app.kubernetes.io/version: 0.12.2
+    helm.sh/chart: lakekeeper-0.11.0
+  name: lakekeeper-db-migration-1
+  namespace: datalake-storage
+spec:
+  template:
+    metadata:
+      annotations:
+        checksum/secret-config-envs: 949a2111b3a0f1b4e48f54daacb91e90b634a7d15b79e815dbc1dd4fdb5e0009
+      labels:
+        app.kubernetes.io/component: db-migration
+        app.kubernetes.io/instance: datalake-storage
+        app.kubernetes.io/managed-by: Helm
+        app.kubernetes.io/name: lakekeeper
+        app.kubernetes.io/part-of: lakekeeper
+        app.kubernetes.io/version: 0.12.2
+        helm.sh/chart: lakekeeper-0.11.0
+      name: lakekeeper-migration
+    spec:
+      containers:
+        - args:
+            - migrate
+          env:
+            - name: LAKEKEEPER__PG_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: encryptionKey
+                  name: lakekeeper-pg-encryption
+            - name: LAKEKEEPER__PLACEHOLDER
+              value: placeholder
+          envFrom:
+            - secretRef:
+                name: lakekeeper-config-envs
+          image: quay.io/lakekeeper/catalog:v0.12.2
+          imagePullPolicy: IfNotPresent
+          name: migration
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          securityContext:
+            runAsGroup: 65534
+            runAsUser: 65532
+      initContainers:
+        - args:
+            - wait-for-db
+            - -d
+            - -r
+            - "100"
+            - -b
+            - "2"
+          env:
+            - name: LAKEKEEPER__PG_USER
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: lakekeeper-db-app
+            - name: LAKEKEEPER__PG_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: encryptionKey
+                  name: lakekeeper-pg-encryption
+            - name: LAKEKEEPER__PLACEHOLDER
+              value: placeholder
+          envFrom:
+            - secretRef:
+                name: lakekeeper-config-envs
+          image: quay.io/lakekeeper/catalog:v0.12.2
+          imagePullPolicy: IfNotPresent
+          name: check-db
+          resources:
+            limits:
+              memory: 64Mi
+            requests:
+              cpu: 25m
+              memory: 32Mi
+          securityContext:
+            runAsGroup: 65534
+            runAsUser: 65532
+      nodeSelector:
+        pool: db
+      restartPolicy: OnFailure
+      serviceAccountName: lakekeeper
+      tolerations:
+        - effect: NoSchedule
+          key: dedicated
+          operator: Equal
+          value: database
