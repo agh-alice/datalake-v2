@@ -30,14 +30,27 @@ for tier in "${TIERS[@]}"; do
   fi
 done
 
-echo "== seam gate: no cluster-scoped kinds (Global Constraints) =="
+echo "== seam gate: every namespaced object, every deployed render state (Global Constraints) =="
 # compute:values-lake.yaml is a distinct RENDER STATE, not a fourth chart --
 # the conditional `lake` catalog (values-lake.yaml, Task 3 Decision 2) only
 # exists once that file is layered on top of values.yaml, and that's the
 # state prod actually runs once G2 (S3 creds) lands. The bare
 # envs/prod/compute pass above never renders it, so without this second
 # pass the gate never proves the render prod will really use is seam-clean.
-hack/check-seam.sh envs/prod/storage envs/prod/compute envs/prod/orchestration "envs/prod/compute:values-lake.yaml"
+#
+# Independent-review finding (2026-08-07): this gate used to run ONLY on
+# the three prod defaults plus compute:values-lake.yaml -- never on any
+# values-kind.yaml combination, even though kubeconform below DOES render
+# those (kubeconform validates schemas; it has no opinion on
+# clusterResourceWhitelist: [] and would happily accept a cluster-scoped
+# object). Every render state actually deployed anywhere -- the three prod
+# defaults, the conditional lake state, and all three kind combinations --
+# now goes through the same gate.
+hack/check-seam.sh envs/prod/storage envs/prod/compute envs/prod/orchestration \
+  "envs/prod/compute:values-lake.yaml" \
+  envs/prod/storage:values-kind.yaml \
+  envs/prod/compute:values-kind.yaml \
+  envs/prod/orchestration:values-kind.yaml
 
 for tier in "${TIERS[@]}"; do
   chart_dir="envs/prod/$tier"
