@@ -27,12 +27,14 @@ helloCron:
 # note (Task 4): kind runs its own `platform` ClusterSecretStore (see
 # envs/prod/storage/values.yaml's identical note) -- values-kind.yaml does
 # NOT override this to false; it stays true on kind too, same store name
-# as production. One gap this does NOT close: SITESONAR_LIMIT (below) has
-# no ExternalSecret data: entry (deliberately, per the Env-var contract
-# note further down -- prod must run the real unbounded backlog), and
-# Task 4's file scope doesn't extend to this chart's templates/, so kind
-# cannot thread a bounded value through the ESO path either. See
-# hack/kind-up.sh and values-kind.yaml for how Task 4 compensates.
+# as production. Independent-review finding (2026-08-07, resolved): Task 4
+# left a gap here -- SITESONAR_LIMIT (see ingest.sitesonarLimit above) had
+# no ExternalSecret data: entry at all, so kind inherited prod's daily
+# SiteSonar schedule with no way to bound the first-ever unbounded fetch
+# against the real alimonitor.cern.ch backlog. Closed: the data: entry
+# below is now values-gated (`{{- if .Values.ingest.sitesonarLimit }}`),
+# empty/unset by default (prod's ExternalSecret is byte-for-byte the same
+# 10-property request it always was), populated by values-kind.yaml.
 externalSecrets:
   enabled: true
 
@@ -85,6 +87,15 @@ images:
 # field exists so the intended value is visible in Git even though the
 # actual runtime value is set out-of-band.
 ingest:
+  # Independent-review finding (2026-08-07): base default empty string --
+  # `{{- if .Values.ingest.sitesonarLimit }}` in templates/
+  # external-secrets.yaml only renders the SITESONAR_LIMIT data: entry when
+  # this is non-empty, so prod's ExternalSecret keeps requesting exactly
+  # the same 10 properties it always has (unbounded backlog drain stays
+  # the prod behavior, unchanged). values-kind.yaml overrides this to "5"
+  # -- see that file's comment for why kind needs a bound at all, and
+  # hack/kind-up.sh for the matching remote-secret literal.
+  sitesonarLimit: ""
   schedules:
     nightly: "0 2 * * *"
     sitesonar: "0 3 * * *"

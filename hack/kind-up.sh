@@ -267,12 +267,20 @@ echo "landing-ro role + remote secret ready"
 # endpoints, DNS names updated to the three-tier namespaces (Plan 5 Task
 # 1). Plan 5 Task 3 moved this Secret onto a real ExternalSecret
 # (namespace `datalake-orchestration`, envs/prod/orchestration/templates/
-# external-secrets.yaml) resolving 10 named properties off a remote Secret
+# external-secrets.yaml) resolving 11 named properties off a remote Secret
 # `ingest-env` in eso-secret-source -- created here instead of directly in
-# the target namespace. NOTE: SITESONAR_LIMIT is deliberately NOT one of
-# the 10 keys that ExternalSecret requests (see envs/prod/orchestration/
-# values-kind.yaml's comment for why, and how kind compensates by NOT
-# tightening the sitesonar schedule instead).
+# the target namespace.
+#
+# SITESONAR_LIMIT (independent-review finding, 2026-08-07, resolved):
+# kind-only -- values-kind.yaml's `ingest.sitesonarLimit: "5"` is what
+# makes the ExternalSecret's data: list request this 11th property at all
+# (values-gated, `{{- if .Values.ingest.sitesonarLimit }}` --
+# envs/prod/orchestration/templates/external-secrets.yaml); prod leaves
+# sitesonarLimit unset, so prod's ExternalSecret never requests this
+# property and the real unbounded backlog drain is untouched. Matches
+# `alice_ingest.sitesonar._resolve_limit()`'s documented kind-only bound
+# (sitesonar.py's module docstring) -- without it, a scheduled kind tick
+# would attempt the real ~1740-file alimonitor.cern.ch backlog.
 if kubectl -n eso-secret-source get secret ingest-env >/dev/null 2>&1; then
   echo "ingest-env remote secret already exists"
 else
@@ -295,7 +303,8 @@ else
     --from-literal=LAKEKEEPER_URI="http://lakekeeper.datalake-storage.svc:8181" \
     --from-literal=LAKEKEEPER_WAREHOUSE="default" \
     --from-literal=RETENTION_DAYS="14" \
-    --from-literal=TRINO_URI="http://trino.datalake-compute.svc:8080"
+    --from-literal=TRINO_URI="http://trino.datalake-compute.svc:8080" \
+    --from-literal=SITESONAR_LIMIT="5"
   echo "ingest-env remote secret created"
 fi
 
