@@ -51,6 +51,23 @@
 # state nothing ever deploys. tpch/tpcds are harmless namespaced ConfigMap
 # entries either way (not a seam violation in either render shape), but the
 # principle applies regardless of what's at stake this time.
+#
+# Same principle now applies to the RELEASE NAMESPACE (2026-08-07 finding):
+# this script used to call `helm template` with no `-n`/`--namespace` at
+# all, so any object a chart renders via bare `.Release.Namespace` (a
+# subchart dependency's own upstream templates, e.g.) landed in Helm's own
+# default of literal `default` here -- a render shape no real deployment
+# ever produces. Argo CD's Source Hydrator always resolves a namespace for
+# `.Release.Namespace` (`sourceHydrator.drySource.helm.namespace` defaults
+# to the Application's `destination.namespace` per the Application CRD,
+# confirmed against the platform's live cluster), so the real render always
+# has one. Each chart-dir arg below now gets `-n datalake-<basename>` --
+# `datalake-storage`/`datalake-compute`/`datalake-orchestration`, matching
+# both this repo's own `destination.namespace` convention
+# (environments/kind/apps/*.yaml) and every hand-authored template's own
+# hardcoded namespace literal -- so the gate validates the shape a
+# deployment actually produces, not an artifact of how this script happens
+# to invoke Helm.
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -150,12 +167,18 @@ fail=0
 for arg in "$@"; do
   chart_dir="${arg%%:*}"
   extra_values=""
-  helm_args=(template "$chart_dir" -f "$chart_dir/values.yaml" --include-crds)
+  # Real destination namespace for this tier -- see the header comment on
+  # why this is no longer omitted. `datalake-<basename>` matches every
+  # tier's actual `destination.namespace` (environments/kind/apps/*.yaml)
+  # and hand-authored template convention; every chart-dir this script is
+  # ever called with lives at `envs/prod/<tier>`, so basename == tier name.
+  ns="datalake-$(basename "$chart_dir")"
+  helm_args=(template "$chart_dir" -f "$chart_dir/values.yaml" -n "$ns" --include-crds)
   if [ "$arg" != "$chart_dir" ]; then
     extra_values="${arg#*:}"
     helm_args+=(-f "$chart_dir/$extra_values")
   fi
-  echo "== seam gate: $chart_dir${extra_values:+ (+ $extra_values)} =="
+  echo "== seam gate: $chart_dir${extra_values:+ (+ $extra_values)} (-n $ns) =="
   rendered="$(helm "${helm_args[@]}")"
   if [ -z "$rendered" ]; then
     echo "  (empty render -- nothing to check)"

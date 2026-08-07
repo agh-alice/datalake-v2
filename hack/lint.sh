@@ -52,19 +52,32 @@ hack/check-seam.sh envs/prod/storage envs/prod/compute envs/prod/orchestration \
   envs/prod/compute:values-kind.yaml \
   envs/prod/orchestration:values-kind.yaml
 
+# 2026-08-07 finding: every render below used to omit -n/--namespace, so
+# any object rendered via bare `.Release.Namespace` (a subchart
+# dependency's own upstream templates, e.g.) landed in Helm's own default
+# of literal `default` -- a render shape no real deployment ever produces.
+# Argo CD's Source Hydrator always resolves a namespace for
+# `.Release.Namespace` (`sourceHydrator.drySource.helm.namespace` defaults
+# to the Application's `destination.namespace` per the Application CRD,
+# confirmed against the platform's live cluster; kind sets the identical
+# `datalake-<tier>` destination.namespace too -- environments/kind/
+# apps/*.yaml), so every render here now passes `-n datalake-$tier` to
+# match. See hack/check-seam.sh's header comment for the fuller writeup
+# (same finding, same fix, applied there too).
 for tier in "${TIERS[@]}"; do
   chart_dir="envs/prod/$tier"
+  ns="datalake-$tier"
   echo "== helm lint ($tier) =="
-  helm lint "$chart_dir" -f "$chart_dir/values.yaml"
+  helm lint "$chart_dir" -f "$chart_dir/values.yaml" -n "$ns"
   echo "== helm template + kubeconform ($tier, prod values) =="
-  helm template "$chart_dir" -f "$chart_dir/values.yaml" --include-crds | kubeconform "${KC_FLAGS[@]}" -
+  helm template "$chart_dir" -f "$chart_dir/values.yaml" -n "$ns" --include-crds | kubeconform "${KC_FLAGS[@]}" -
   if [ -f "$chart_dir/values-kind.yaml" ]; then
     echo "== helm template + kubeconform ($tier, kind values) =="
-    helm template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/values-kind.yaml" --include-crds | kubeconform "${KC_FLAGS[@]}" -
+    helm template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/values-kind.yaml" -n "$ns" --include-crds | kubeconform "${KC_FLAGS[@]}" -
   fi
   if [ -f "$chart_dir/values-lake.yaml" ]; then
     echo "== helm template + kubeconform ($tier, lake values -- the conditional G2 state) =="
-    helm template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/values-lake.yaml" --include-crds | kubeconform "${KC_FLAGS[@]}" -
+    helm template "$chart_dir" -f "$chart_dir/values.yaml" -f "$chart_dir/values-lake.yaml" -n "$ns" --include-crds | kubeconform "${KC_FLAGS[@]}" -
   fi
 done
 
