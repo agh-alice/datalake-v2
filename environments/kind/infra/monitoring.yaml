@@ -176,9 +176,31 @@ spec:
         prometheus:
           prometheusSpec:
             retention: 15d
-            ruleSelectorNilUsesHelmValues: false
-            serviceMonitorSelectorNilUsesHelmValues: false
-            podMonitorSelectorNilUsesHelmValues: false
+            # Independent-review finding (2026-08-07, resolved): these three
+            # were `false` with no selector supplied -- which means an EMPTY
+            # selector, i.e. kind's Prometheus adopted every PrometheusRule/
+            # ServiceMonitor/PodMonitor in the cluster, unconditionally.
+            # Production's platform-owned Prometheus only adopts objects
+            # labelled `release: monitoring` (README.md's "Their Prometheus
+            # adopts our PrometheusRule/PodMonitor objects via label
+            # release: monitoring" line; envs/prod/storage/templates/
+            # monitoring.yaml and datalake-alerts.yaml's identical rationale
+            # comments) -- with the old nil-uses-empty-selector config, kind
+            # could never exercise that constraint: a rule or monitor added
+            # WITHOUT the label would still be silently adopted on kind,
+            # every check would pass, and production would silently ignore
+            # it forever. Explicit selectors matching production's own
+            # `release: monitoring` label close that gap. kube-prometheus-
+            # stack's own bundled ServiceMonitors/PodMonitors (prometheus,
+            # alertmanager, kube-state-metrics, node-exporter, grafana) carry
+            # this label automatically via the chart's default `release:
+            # {{ .Release.Name }}` templating -- this Application's Helm
+            # release name is "monitoring" (`metadata.name` above), so they
+            # keep being adopted; live-verified post-change, see the
+            # relevant task report.
+            ruleSelector: {matchLabels: {release: monitoring}}
+            serviceMonitorSelector: {matchLabels: {release: monitoring}}
+            podMonitorSelector: {matchLabels: {release: monitoring}}
   destination: {server: https://kubernetes.default.svc, namespace: monitoring}
   syncPolicy:
     automated: {prune: true, selfHeal: true}
