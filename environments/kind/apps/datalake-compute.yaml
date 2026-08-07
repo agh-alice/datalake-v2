@@ -30,7 +30,11 @@ spec:
   # See datalake-storage.yaml's identical block for the full rationale
   # (ESO CRD schema defaults several optional ExternalSecret fields this
   # chart's templates never set explicitly, which otherwise blocks Synced
-  # forever even though live already matches every field that IS set).
+  # forever even though live already matches every field that IS set) and
+  # for why `.spec.target.deletionPolicy` was REMOVED from this list
+  # (independent-review finding, 2026-08-07 -- templates/external-secrets.yaml
+  # now sets it explicitly; leaving it ignored here would have silently
+  # defeated that fix).
   ignoreDifferences:
     - group: external-secrets.io
       kind: ExternalSecret
@@ -39,7 +43,6 @@ spec:
         - .spec.data[].remoteRef.decodingStrategy
         - .spec.data[].remoteRef.metadataPolicy
         - .spec.target.creationPolicy
-        - .spec.target.deletionPolicy
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]

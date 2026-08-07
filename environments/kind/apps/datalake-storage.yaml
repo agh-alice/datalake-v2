@@ -71,15 +71,26 @@ spec:
   # Live finding, Task 4 clean-room: ExternalSecret objects never reach
   # Synced -- ESO's own CRD schema defaults several optional fields
   # (remoteRef.conversionStrategy, .decodingStrategy, .metadataPolicy;
-  # target.creationPolicy, .deletionPolicy) that this chart's templates
-  # (deliberately minimal, no-secrets-in-git) never set explicitly.
-  # ArgoCD's SSA-based diff sees "desired lacks these keys, live has
-  # them" and reports OutOfSync forever, even though live already matches
-  # the rendered manifest byte-for-byte on every field that IS specified
-  # -- confirmed live via `kubectl get externalsecret ... -o
-  # jsonpath='{.spec}'` vs. the hydrated manifest.yaml, the only delta is
-  # these server-defaulted fields. Ignored here rather than hand-setting
-  # every default explicitly in the (out-of-scope) chart templates.
+  # target.creationPolicy) that this chart's templates (deliberately
+  # minimal, no-secrets-in-git) never set explicitly. ArgoCD's SSA-based
+  # diff sees "desired lacks these keys, live has them" and reports
+  # OutOfSync forever, even though live already matches the rendered
+  # manifest byte-for-byte on every field that IS specified -- confirmed
+  # live via `kubectl get externalsecret ... -o jsonpath='{.spec}'` vs. the
+  # hydrated manifest.yaml, the only delta is these server-defaulted
+  # fields. Ignored here rather than hand-setting every default explicitly
+  # in the (out-of-scope) chart templates.
+  #
+  # `.spec.target.deletionPolicy` REMOVED from this list (independent-review
+  # finding, 2026-08-07): it used to be one more "never set explicitly"
+  # field, ESO's own default (Retain, live-verified) always showing up on
+  # live and never in git, hence ignored here too. templates/
+  # external-secrets.yaml now sets it explicitly (`Delete`, per that file's
+  # deletionPolicy comment -- revoked credentials must actually stop being
+  # served). Leaving it in this ignoreDifferences list after that change
+  # would have silently defeated the fix: ArgoCD would never flag, and
+  # selfHeal would never correct, live drift away from the value git now
+  # pins deliberately.
   ignoreDifferences:
     - group: external-secrets.io
       kind: ExternalSecret
@@ -88,7 +99,6 @@ spec:
         - .spec.data[].remoteRef.decodingStrategy
         - .spec.data[].remoteRef.metadataPolicy
         - .spec.target.creationPolicy
-        - .spec.target.deletionPolicy
   syncPolicy:
     automated: {prune: true, selfHeal: true}
     syncOptions: [ServerSideApply=true]
